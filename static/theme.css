@@ -1,0 +1,113 @@
+/* Shared design tokens and components used by both index.html (spectator
+   dashboard) and roster.html (operator roster manager). Page-specific
+   layout (card grid vs. table) stays inline in each page. */
+:root {
+    --bg-color: #121214;
+    --card-color: #1e1e24;
+    --card-color-hover: #24242c;
+    --border-color: #33333c;
+    --text-color: #f0f0f5;
+    --text-muted: #9a9aa5;
+    --accent-color: #f3a73c;
+    --bar-color: #4a8fe7;
+    --alliance-color: #4a8fe7;
+    --horde-color: #d9534f;
+    --neutral-color: #7a7a85;
+    --live-color: #e6394f;
+}
+* { box-sizing: border-box; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    margin: 0;
+    padding: 20px;
+}
+/* No hard cap: the card grid's own minmax()/auto-fill keeps individual
+   cards a sane size regardless of viewport, so removing this lets a wide
+   LAN TV/projector show more columns instead of stretching 3 fixed ones. */
+.container { max-width: none; margin: 0 auto; }
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    border-bottom: 2px solid var(--card-color);
+    padding-bottom: 20px;
+    margin-bottom: 20px;
+}
+h1 { margin: 0; font-size: 22px; color: var(--accent-color); }
+.header-right { display: flex; align-items: center; gap: 12px; }
+#playerCount { font-size: 13px; color: var(--text-muted); }
+.nav-link {
+    color: var(--text-muted);
+    font-size: 13px;
+    text-decoration: none;
+    border: 1px solid var(--border-color);
+    padding: 5px 10px;
+    border-radius: 6px;
+}
+.nav-link:hover { color: var(--text-color); border-color: var(--text-muted); }
+
+/* Controls */
+.controls { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+input, select {
+    background-color: var(--card-color);
+    border: 1px solid var(--border-color);
+    color: var(--text-color);
+    padding: 10px 15px;
+    border-radius: 6px;
+    font-size: 14px;
+}
+input:focus, select:focus { outline: 1px solid var(--accent-color); }
+.grow { flex: 1 1 200px; }
+
+/* Connection status */
+#status { font-size: 13px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; }
+.connected { background-color: #2e7d32; }
+.disconnected { background-color: #c62828; }
+
+/* Faction accents, reused wherever a faction name/border shows up */
+.faction-alliance { color: var(--alliance-color); }
+.faction-horde { color: var(--horde-color); }
+
+/* Tags */
+.tag-chip {
+    background-color: rgba(243, 167, 60, 0.12);
+    color: var(--accent-color);
+    border: 1px solid rgba(243, 167, 60, 0.35);
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    display: inline-block;
+    /* A tag with no spaces (or one absurdly long) can't wrap, so without a
+       cap it stretches the chip — and the card/row around it — arbitrarily
+       wide. Truncate instead; the full text is still on the tooltip. */
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: bottom;
+}
+
+/* Streaming badge */
+/* A plain channel-link icon — deliberately makes no live/offline claim,
+   since we have no way to check real-time status without polling each
+   platform's API. It's "here's their channel," not "they're live now." */
+.stream-badge {
+    display: inline-flex;
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    overflow: hidden;
+    flex-shrink: 0;
+    transition: transform 0.1s ease;
+}
+.stream-badge:hover { transform: scale(1.1); }
+.stream-badge svg { width: 100%; height: 100%; display: block; }
+
+/* Shared buttons */
+.btn { border: none; border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
+.btn-save { background-color: var(--accent-color); color: #000; font-weight: 600; }
+.btn-save[disabled] { background-color: var(--border-color); color: var(--text-muted); cursor: default; }

@@ -1,0 +1,18 @@
+# --- Core Web Framework ---
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+
+# --- Asynchronous Database ---
+aiosqlite>=0.20.0
+
+# --- Config / Secrets ---
+python-dotenv>=1.0.0
+
+# --- Networking & Data Validation ---
+pydantic>=2.6.0
+requests>=2.31.0
+
+# Note: PyInstaller and the watcher's tray-icon libraries (pystray, Pillow) are
+# deliberately not listed here — they're only needed to build or run the
+# player-side watcher, and the server/Docker image never uses them. Install
+# them separately: pip install -r requirements-watcher.txt

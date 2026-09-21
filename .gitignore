@@ -1,0 +1,38 @@
+# Secrets
+.env
+
+# Runtime data — *.db catches whatever DB_FILE is set to (beta.db, live.db, etc.)
+*.db
+watcher_backup.csv
+watcher_errors.log
+.watcher_state.json
+watcher_config.json
+savedvars_watcher_backup.csv
+savedvars_watcher_errors.log
+.savedvars_watcher_state.json
+savedvars_watcher_config.json
+
+# Machine-specific SavedVariables sample/export, not source
+/LanDashboard.lua
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+savedvars_watcher.log
+
+# PyInstaller build output — rebuild with the command in README.md rather
+# than committing the .exe itself.
+/build/
+/dist/
+*.spec
+
+# The hosted watcher .exe (14 MB, and a new copy every rebuild would stay in
+# git history forever). It's uploaded to the server's mounted downloads
+# folder instead — see "Deploy to Coolify" in README.md.
+/downloads/
+
+# Local dev tool that feeds fake players to a running server; kept out of the
+# repo by choice, not needed to run the site.
+mock_generator.py

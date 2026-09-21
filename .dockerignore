@@ -1,0 +1,23 @@
+# Keep secrets, local data and build junk out of the build context. The
+# Dockerfile only COPYs specific files anyway; this just keeps the context
+# small and makes sure none of this can be picked up by accident.
+.env
+.venv/
+__pycache__/
+*.pyc
+*.db
+build/
+dist/
+*.spec
+downloads/
+savedvars_watcher.log
+mock_generator.py
+.savedvars_watcher_state.json
+.watcher_state.json
+savedvars_watcher_backup.csv
+savedvars_watcher_errors.log
+watcher_backup.csv
+watcher_errors.log
+watcher_config.json
+savedvars_watcher_config.json
+/LanDashboard.lua

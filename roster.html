@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LAN Roster Manager</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="stylesheet" href="/static/theme.css">
+    <style>
+        /* Page-specific: an editable table instead of the spectator card grid */
+        .table-wrap { overflow-x: auto; border-radius: 10px; border: 1px solid var(--border-color); }
+        table { width: 100%; border-collapse: collapse; min-width: 900px; }
+        thead th {
+            text-align: left;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--text-muted);
+            background-color: var(--card-color);
+            padding: 10px 12px;
+            position: sticky;
+            top: 0;
+        }
+        thead th.sortable { cursor: pointer; user-select: none; }
+        thead th.sortable:hover { color: var(--text-color); }
+        .sort-indicator { display: inline-block; width: 10px; opacity: 0.7; }
+        tbody td {
+            padding: 8px 12px;
+            border-top: 1px solid var(--border-color);
+            font-size: 13.5px;
+            vertical-align: middle;
+        }
+        tbody tr:hover { background-color: var(--card-color-hover); }
+        tbody tr.row-unsaved { background-color: rgba(243, 167, 60, 0.06); }
+        .col-input input { width: 100%; min-width: 160px; padding: 6px 10px; font-size: 13px; }
+        .col-tags input { min-width: 200px; }
+        .name-cell { font-weight: 600; white-space: nowrap; }
+        .level-cell { color: var(--text-muted); white-space: nowrap; }
+        .unsaved-dot {
+            display: inline-block;
+            width: 7px; height: 7px;
+            border-radius: 50%;
+            background-color: var(--accent-color);
+            margin-right: 6px;
+            visibility: hidden;
+        }
+        .row-unsaved .unsaved-dot { visibility: visible; }
+        .save-status { font-size: 11px; color: var(--text-muted); margin-left: 8px; white-space: nowrap; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <h1>LAN Roster Manager</h1>
+        <div class="header-right">
+            <span id="playerCount"></span>
+            <a class="nav-link" href="/setup">Setup &amp; Downloads</a>
+            <a class="nav-link" href="/">Back to Dashboard</a>
+            <div id="status" class="disconnected">Connecting...</div>
+        </div>
+    </header>
+
+    <div class="controls">
+        <input class="grow" type="text" id="searchBar" placeholder="Search character name..." oninput="renderRoster()">
+    </div>
+
+    <div class="table-wrap">
+        <table>
+            <thead id="rosterHead">
+                <tr>
+                    <th></th>
+                    <th class="sortable" data-sort="name">Name <span class="sort-indicator"></span></th>
+                    <th class="sortable" data-sort="level">Lvl <span class="sort-indicator"></span></th>
+                    <th class="sortable" data-sort="faction">Faction <span class="sort-indicator"></span></th>
+                    <th class="sortable" data-sort="class">Class <span class="sort-indicator"></span></th>
+                    <th class="sortable" data-sort="guild">Guild <span class="sort-indicator"></span></th>
+                    <th>Stream Link</th>
+                    <th>Tags</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody id="rosterBody">
+                <!-- Rendered dynamically by JavaScript -->
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script src="/static/vendor/morphdom-umd.min.js"></script>
+<script src="/static/dashboard.js"></script>
+<script>
+    const editDrafts = {};   // In-progress edits per player, keyed by name
+    const saveStatus = {};   // Transient "Saved" / "Failed" text per player
+
+    function isDirty(name, player) {
+        const draft = editDrafts[name];
+        if (!draft) return false;
+        const committedTags = (player.tags || []).join(", ");
+        return draft.streamUrl !== (player.stream_url || "") || draft.tags !== committedTags;
+    }
+
+    async function saveRow(name) {
+        const draft = editDrafts[name] || {};
+        const button = document.querySelector(`[data-action="save"][data-name="${CSS.escape(name)}"]`);
+        if (button) button.disabled = true;
+        try {
+            const result = await postRosterMeta(name, draft.streamUrl, draft.tags);
+            saveStatus[name] = result.status === "success" ? "Saved" : "Failed";
+        } catch (e) {
+            console.error("Failed to save roster info for", name, e);
+            saveStatus[name] = "Failed";
+        }
+        delete editDrafts[name];
+        renderRoster();
+        setTimeout(() => { delete saveStatus[name]; renderRoster(); }, 2000);
+    }
+
+    function buildRow(player, index) {
+        const safeName = escapeHtml(player.name);
+        const factionTextClass = player.faction === "Alliance" ? "faction-alliance"
+            : player.faction === "Horde" ? "faction-horde" : "";
+        const classColor = CLASS_COLORS[player.class] || "var(--text-color)";
+        const draft = editDrafts[player.name] || {
+            streamUrl: player.stream_url || "",
+            tags: (player.tags || []).join(", "),
+        };
+        const dirty = isDirty(player.name, player);
+        const status = saveStatus[player.name];
+        const rowId = playerElementId("row", player.name);
+
+        return `
+            <tr id="${rowId}" class="${dirty ? "row-unsaved" : ""}">
+                <td><span class="unsaved-dot" title="Unsaved changes"></span></td>
+                <td class="name-cell" style="color:${classColor}">${safeName}</td>
+                <td class="level-cell">${player.level}</td>
+                <td class="${factionTextClass}">${escapeHtml(player.faction || "—")}</td>
+                <td style="color:${classColor}">${escapeHtml(player.class || "—")}</td>
+                <td>${escapeHtml(player.guild || "—")}</td>
+                <td class="col-input">
+                    <input type="text" placeholder="https://twitch.tv/..." value="${escapeHtml(draft.streamUrl)}"
+                           data-field="streamUrl" data-name="${safeName}">
+                </td>
+                <td class="col-input col-tags">
+                    <input type="text" placeholder="Team Alpha, LAN local" value="${escapeHtml(draft.tags)}"
+                           data-field="tags" data-name="${safeName}">
+                </td>
+                <td style="white-space:nowrap;">
+                    <button class="btn btn-save" data-action="save" data-name="${safeName}" ${dirty ? "" : "disabled"}>Save</button>
+                    <span class="save-status">${status ? escapeHtml(status) : ""}</span>
+                </td>
+            </tr>
+        `;
+    }
+
+    // Toggles the dirty-row indicator and Save button without touching any
+    // input element, so typing never risks the focus/rebuild dance above —
+    // it's simply not needed for a keystroke that isn't changing the list.
+    function updateRowDirtyState(name) {
+        const player = playerData[name] || {};
+        const dirty = isDirty(name, player);
+        const anchor = document.querySelector(`[data-field][data-name="${CSS.escape(name)}"]`);
+        const row = anchor && anchor.closest("tr");
+        if (!row) return;
+        row.classList.toggle("row-unsaved", dirty);
+        const saveBtn = row.querySelector('[data-action="save"]');
+        if (saveBtn) saveBtn.disabled = !dirty;
+    }
+
+    // Attached once, on the tbody itself, rather than per-render on each
+    // row's elements. morphdom keeps existing rows' DOM nodes alive across
+    // renders instead of destroying/recreating them (that's the point —
+    // it's what preserves focus and hover state), so re-running
+    // addEventListener on every render would keep stacking a new listener
+    // onto the same surviving nodes, firing a save N times per click after
+    // N renders. Delegation sidesteps that: the listener never moves.
+    const rosterBody = document.getElementById("rosterBody");
+    rosterBody.addEventListener("click", (e) => {
+        const btn = e.target.closest('[data-action="save"]');
+        if (btn) saveRow(btn.dataset.name);
+    });
+    rosterBody.addEventListener("input", (e) => {
+        const field = e.target.closest("[data-field]");
+        if (!field) return;
+        const draft = editDrafts[field.dataset.name] || (editDrafts[field.dataset.name] = {
+            streamUrl: (playerData[field.dataset.name] || {}).stream_url || "",
+            tags: ((playerData[field.dataset.name] || {}).tags || []).join(", "),
+        });
+        draft[field.dataset.field] = field.value;
+        updateRowDirtyState(field.dataset.name);
+    });
+
+    // Column sorting for the table header
+    let sortColumn = "name";
+    let sortDirection = 1; // 1 = ascending, -1 = descending
+
+    function compareByColumn(a, b, column) {
+        const av = a[column], bv = b[column];
+        if (typeof av === "number" && typeof bv === "number") return av - bv;
+        return String(av || "").localeCompare(String(bv || ""));
+    }
+
+    function updateSortIndicators() {
+        document.querySelectorAll("#rosterHead th.sortable").forEach(th => {
+            const indicator = th.querySelector(".sort-indicator");
+            indicator.textContent = th.dataset.sort === sortColumn ? (sortDirection === 1 ? "▲" : "▼") : "";
+        });
+    }
+
+    document.getElementById("rosterHead").addEventListener("click", (e) => {
+        const th = e.target.closest("th.sortable");
+        if (!th) return;
+        const column = th.dataset.sort;
+        if (sortColumn === column) {
+            sortDirection *= -1; // clicking the active column reverses it
+        } else {
+            sortColumn = column;
+            sortDirection = 1;
+        }
+        updateSortIndicators();
+        renderRoster();
+    });
+    updateSortIndicators();
+
+    function renderRoster() {
+        const searchQuery = document.getElementById("searchBar").value.toLowerCase();
+
+        let players = Object.keys(playerData).map(name => ({ name, ...playerData[name] }));
+        if (searchQuery) {
+            players = players.filter(p => p.name.toLowerCase().includes(searchQuery));
+        }
+        players.sort((a, b) => sortDirection * compareByColumn(a, b, sortColumn));
+
+        document.getElementById("playerCount").textContent =
+            players.length ? `${players.length} player${players.length === 1 ? "" : "s"}` : "";
+
+        if (players.length === 0) {
+            rosterBody.innerHTML = `<tr><td colspan="9" style="text-align:center; padding:30px; color:#666;">No players yet...</td></tr>`;
+            return;
+        }
+
+        const html = players.map((player, index) => buildRow(player, index)).join("");
+        morphChildren(rosterBody, html);
+    }
+
+    connectWebSocket(renderRoster);
+</script>
+</body>
+</html>

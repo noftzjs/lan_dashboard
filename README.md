@@ -1,0 +1,155 @@
+# ⚔️ World of Warcraft Classic LAN Progression Dashboard
+
+An automated, lightweight, and future-proof real-time progression tracker designed for a multi-user LAN party environment. It bypasses the traditional limitations of WoW addons — which can't make network calls or write arbitrary files directly — by queuing progression events into the addon's `SavedVariables` file (flushed to disk via a self-triggered `/reload` at safe moments) and streaming them across the local network to a central visual leaderboard.
+
+---
+
+## 🚀 Current Architecture & Features
+
+### 1. Central FastAPI Engine
+* **Asynchronous Design:** Built using **FastAPI** and `asyncio` to seamlessly handle concurrent data packets from up to 50+ players without blocking threads.
+* **Instant Streaming:** Utilizes native **WebSockets** to broadcast game states immediately to any connected spectator browser window.
+* **Persistent Storage:** Integrated with an asynchronous SQLite database layer (`aiosqlite`). It automatically saves historical timelines and preserves individual player snapshot progress in case of server bumps or restarts.
+
+### 2. Client-Side Python Watchers
+* **`savedvars_watcher.py` (primary):** Reads the addon's `SavedVariables` file — which flushes to disk on `/reload`, unlike the chat log — and forwards queued events to the server. This is the one that actually delivers data during an active play session; see below for why.
+* **`log_watcher.py` (supplementary):** Tails `WoWChatLog.txt`. Confirmed (not assumed) that this file only flushes to disk on a full client exit, never on `/reload` — so it can't deliver anything close to live data during play. Still useful as a last-resort catch-all: whatever the addon printed ends up here once someone fully exits the game.
+* **Fail-Safe Logging:** Both watchers record every event to a local backup CSV file first, ensuring zero data loss if the central LAN server goes offline.
+
+### 3. Reactive Web Dashboard Frontend
+* **Real-Time Leaderboard:** A lightweight, framework-free single-page UI (`index.html`) featuring real-time rank updates and animated XP completion bars.
+* **Server-Safe Filters:** Search by name/guild and filter by faction/class, plus alpha/level sorting, all executed entirely in the client browser to prevent server strain.
+* **Roster Manager (`roster.html`):** Password-protected operator page for bulk-editing stream links and tags, with sortable columns — separate from the public spectator dashboard.
+
+### 4. Developer Testing Suite
+* **Simulated Ecosystem:** A local-only mock script (`mock_generator.py` — kept out of git via `.gitignore`, so it won't exist in a fresh clone) that emulates leveling characters turning in quests and logging mob kills to stress-test layout updates, plus a `--chaos` mode that injects malformed payloads to verify the server degrades gracefully.
+
+### 5. SavedVariables Watcher (`savedvars_watcher.py`)
+* Reads the addon's `LanDashboardDB.events` queue from its `SavedVariables` file and forwards new entries to the server, with a local CSV fail-safe backup and automatic retry queueing if the server is temporarily unreachable.
+* Unlike a log file, `SavedVariables` is fully *rewritten* on every save rather than appended to — this watcher re-parses the whole (small) file each poll and tracks how many of its events have already been sent, rather than tailing it.
+* Requires the addon's reload-trigger system (see `LanDashboard.lua`) to actually be flushing — check `/ldb` in-game to confirm events are queuing.
+* Configure via `savedvars_watcher_config.json` (path, server URL, poll interval) or CLI flags — see the script's docstring.
+
+### 6. Log Watcher (`log_watcher.py`)
+* Tails the WoW chat log file for lines the addon prints (`[DASHBOARD] player,TYPE,...`) and forwards them to the server. Same fail-safe backup/retry behavior as above.
+* Requires chat logging enabled in-game first (`/console logging chat 1`) — **but only delivers data when the client fully exits**, not during live play (confirmed empirically). Keep running as a catch-all safety net; don't rely on it for anything time-sensitive.
+* Configure via `watcher_config.json` (path, server URL, poll interval) or CLI flags — see the script's docstring.
+
+---
+
+## 🗺️ Roadmap & Feature Backlog
+
+### Phase 1: Core Deployment (Launch Day Readiness)
+- [x] Construct the minimalist structural WoW Addon boilerplate (`.toc` and `.lua` files).
+- [x] Build the client-side log watcher (`log_watcher.py`) that tails the chat log and forwards events.
+- [x] Compile the watchers into portable, single-click Windows binaries (`.exe`) so end users don't need Python installed — see Phase 4 for the auto-discovery UX and the frozen-path bug fix that made it actually reliable.
+- [x] **Setup page with hosted downloads** (`/setup`, linked from the dashboard and roster headers): a player-facing guide covering the addon install, the watcher, how syncing works, addon commands and troubleshooting, plus download buttons for both pieces. The addon zip is built from `LanDashboard/` on every request (never stale, correct `LanDashboard/` folder nesting, versioned filename); the watcher `.exe` is served from `downloads/` with its size and SHA-256 shown on the page. On a server with no passphrase, a built-in config-file generator writes `savedvars_watcher_config.json` (server URL taken from the address the visitor is already on, plus the access token if this server requires one) entirely in the browser — the token is never sent back or stored, so friends only need to drop the file next to the `.exe`. Verified end to end: routes, zip contents byte-for-byte against source, exe checksum, the exe run with a generated config against a token-protected server (wrong token and right token), the page at desktop and phone width (found and fixed a real mobile overflow), the config download in a real browser, the missing-exe case, and the same set inside the Docker image. Also from this pass: the watcher now says so when the server refuses its token (previously it reported any HTTP error as "server unreachable", which would have sent a friend with a typo'd token in the wrong direction) and no longer repeats its "queued" line every poll while the server is refusing.
+- [x] **Passphrase-gated watcher download** (`DOWNLOAD_PASSPHRASE`, optional `PUBLIC_URL`): the setup page asks for a passphrase and returns a zip of the `.exe` + a server-generated `savedvars_watcher_config.json` (address + ingestion token) + a short README, so friends unzip and run with nothing to edit and never handle the token; the bare `.exe` route returns 403 while a passphrase is set, and the bundle endpoint 404s for everything when none is (so an unset passphrase can't leak the token). Wrong guesses: 401, then a site-wide 429 lockout after 10 in a minute. Verified: 15 gate checks (incl. behind-a-proxy `Host`/`X-Forwarded-Proto` → `https://4l.noftz.net`, zip contents byte-identical to `downloads/`, lockout), the form in a real browser (wrong guess shows the error and saves nothing; right one saves the zip), the ungated fallback, and the friend flow itself. Also hardened all three secret comparisons (roster login, ingestion token, passphrase) so a non-ASCII character gives a 401 instead of a 500.
+- [x] **Watcher runs in the system tray** (`--noconsole` build): no terminal window; a "4L" icon with a green/amber/red status dot, tooltip and menu (status, open dashboard, open log, open folder, quit), Windows notifications for problems (once per problem, not per poll), a single-instance guard, and a log file instead of console output. No prompts anywhere: with several WoW accounts it follows the most recently used, and until the addon's first save exists it re-scans every 30s. Verified against a token-protected server: 22 checks on the real tray code (statuses, one notification per problem, first-save-appears-mid-run, discovery loop, icons rendered), then the packaged `.exe` unzipped from the real bundle and run with no arguments — discovered the WoW file, delivered data, no console or window anywhere in its process tree, second copy refused, clean exit. Not verified: the icon's appearance in the actual taskbar (Windows 11 hides new tray icons under the `^` flyout, which automation can't see). Fixed in the same pass: the backup CSV was re-appended with every still-pending event on every poll while the server refused or was unreachable (a typo'd token would have grown it by hundreds of lines every few seconds).
+- [ ] Optional tray menu extras: a "Start with Windows" toggle (today the setup page just describes the `shell:startup` shortcut), and a "Choose WoW folder…" picker for unusual installs (today: add `savedvars_path` to the config file).
+- [ ] Code-sign the watcher `.exe` (a certificate costs money, but it's what removes the "Windows protected your PC" warning and most antivirus false positives); until then the setup page explains the warning and shows the SHA-256.
+- [ ] Setup page polish, if wanted: screenshots of the sync button and the AddOns list, and a per-WoW-version note once the addon supports more than the current beta's interface number.
+- [x] Verify game client API text-streaming compatibility — confirmed `WoWChatLog.txt` only flushes to disk on a full client exit, a real WoW limitation independent of our addon/setup, not something `/console logging chat 1` alone fixes.
+- [x] **Migrate the actual `[DASHBOARD]` event data from `print()`/chat to a `SavedVariables` queue.** `LanDashboardDB.events` now carries the real data; `print()` is kept only for the player's own visual confirmation in chat.
+- [x] **Build `savedvars_watcher.py`**, the watcher that actually reads `LanDashboardDB` and forwards it to the server — verified end-to-end against a real captured `SavedVariables` sample: correct parsing (including an empty-zone edge case and empty-guild PROFILE lines), correct incremental forwarding on a second simulated reload (no resending already-delivered events), and correct resulting server-side state.
+- [ ] **Remove the addon's chat output.** Every queued event is still echoed into the chat frame via `print("[DASHBOARD] ...")` (plus the `Score:` line after quests) — a leftover from when the chat log was the delivery path. Now that `SavedVariables` carries the data, that's just noise flooding chat; drop the per-event echo and keep only the deliberate prompts (sync button, first-login notice, `/ldb` output). Consider a `/ldb verbose` switch for debugging rather than deleting the output outright.
+- [ ] Redistribute the addon (currently v2.9.1 — first-login-only sync prompt with a dismiss button; earlier: the click-to-sync button, adds class capture, guild/faction-change detection, the `"No Guild"` fix, the reload-trigger scoring system, the `SavedVariables` event queue, the click-to-sync button fix for `ReloadUI()` taint, and a fix for redundant PROFILE/ZONE re-emission on the addon's own reloads) to every player once defaults are dialed in.
+- [x] Fix the `"No Guild"` sentinel collision: the addon was sending the literal string `"No Guild"` for guildless characters, indistinguishable from a real guild actually named that. Now sends/stores empty (`None`) instead — verified a guildless player, a legitimately-named "No Guild" guild, and migration of already-stored bad rows all behave correctly.
+- [x] **Reload-trigger scoring system** (v2.6.0+): a scored safe-window system (flight path departure, AFK, loading screens) decides when to prompt for a reload — tunable live via `/run LDB_WEIGHT_QUEST = 5` etc., `/ldb` to check status. Kill-based scoring was removed (see below); quest and level-up weights carry it alone now. Still tuning default weights/thresholds with real play data.
+- [x] **Switched from self-triggered `ReloadUI()` to a click-to-sync button** (v2.8.0): a real flight path departure threw `ADDON_ACTION_BLOCKED` when the addon called `ReloadUI()` from its `PLAYER_CONTROL_LOST` handler — that event fires downstream of a Blizzard-protected action (taking a taxi), and `Reload()` is protected in at least some addon contexts (combat lockdown for certain; whether it's blocked more broadly on this beta is unverified). Safe windows now show a "Sync LAN Dashboard" button instead of reloading from inside the event handler, with a fresh `InCombatLockdown()` check at click time. **Not verified in-game:** an addon-made button's click handler is still addon code, so a click does not by itself make the call secure — if the click also throws `ADDON_ACTION_BLOCKED`, the next step is an action-button template (`InsecureActionButtonTemplate`/secure macro) instead of a plain button. `/ldb sync` force-shows the button for testing. Also removed the now-unnecessary post-combat auto-flush (`PLAYER_REGEN_ENABLED`) — the button just sits there until clicked, with a fresh combat check at click time instead.
+- [x] Diagnosed and fixed an `ADDON_ACTION_FORBIDDEN` addon-load failure: traced via a BugSack stack trace (not guessed) to `RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")` — Blizzard has removed addon access to that live API event entirely in the "Midnight" beta (interface 16001+), as part of restricting addons from using combat data to drive real-time decisions. Removed the registration and the kill-scoring weight that depended on it. The separate *file* `WoWCombatLog.txt` is confirmed still fully populated on this same beta client — only the live addon API was restricted, not the file the game engine writes to disk, so an external watcher tailing that file directly (a possible future addition for zone/activity data) is unaffected. **Checked against a real 9/18 capture (see the new-character item below): it can't serve as the source of character identity, though** — it logs every player in range (dozens of strangers on the public beta) and only marks the local player via `0x511` source flags once they act in combat, an idle login writes just a nameless `ZONE_CHANGE`/`MAP_CHANGE`, it carries no class or faction, and it isn't on unless someone runs `/combatlog` each session.
+
+- [x] **New characters now prompt for sync at login** (v2.9.0): PROFILE/ZONE were only queued in memory until SavedVariables was written, and the sync prompt is score-gated (quests/level-ups), so a fresh character had score 0 and stayed invisible until the player happened to `/reload` or log out — the "spotty" behavior. A genuine login now shows the Sync button immediately — **but only the first time the addon ever sees that character** (v2.9.1): it keeps a per-character ledger (`LanDashboardDB.known`) instead of guessing "new" from level/XP/zone, which would keep re-prompting a level-1 alt parked in the starting zone and miss a leveled character that never reached the dashboard. The button also has an X to dismiss it, and `/ldb forget` clears the ledger (do this everywhere after pointing the server at a fresh `DB_FILE`, since players would otherwise not re-register). Trade-off: a returning character no longer gets a login prompt, so if it had gone idle-hidden on the dashboard it reappears at its next sync (score-based prompt, or `/ldb sync`). `LDB_AUTO_SYNC_ON_LOGIN` (default off, `/run LDB_AUTO_SYNC_ON_LOGIN = true`) is an experiment to try a zero-click reload 3s after login; unverified on this client, and the button remains the fallback.
+- [x] **Stale cards hidden** (server + `index.html`): any accepted event (ZONE/PROFILE/XP/QUEST) stamps `last_activity` (persisted); a character with none for `STALE_AFTER_MINUTES` (default 60) is hidden from the spectator dashboard by default; an **Activity** filter next to the other filters ("Active only (N idle hidden)" / "Show all") brings them back. Characters that predate this feature have no recorded activity, so they stay hidden until their next sync. The server sends an age (`idle_seconds`) rather than a timestamp so browser/server clock or timezone differences can't skew it, and the page re-checks every 30s. Roster page still lists everyone. Caveat: this measures when the *server last heard* from a character, and delivery is reload-gated — an active player who hasn't synced within the window also drops off until their next sync.
+
+### Phase 2: Enhanced Visual Analytics
+- [ ] **Level Velocity Charts:** Implement linear progression timelines (e.g., Chart.js) showing time-per-level curves for each player.
+- [ ] **XP Composition Breakdowns:** Create pie charts showing how much of a player's total XP came from dungeon grinding vs. standard quest turn-ins.
+- [ ] **LAN Milestone Announcements:** Integrate global toast alerts whenever someone hits a milestone level (e.g., *"Leeroy has reached Level 20!"*).
+- [ ] **Playtime tracking:** Capture `/played` and log it alongside each level-up for richer historical data (time-to-level, not just XP-to-level).
+- [ ] **More per-character data points:** e.g. total deaths, time played (above), and other counters worth showing on cards or in the analytics view (candidates: gold, quests completed, professions, kills-by-type — anything that's cheap for the addon to read and safe from the Midnight-era API restrictions, since the combat log event is off-limits to addons on this client). Each new field means an addon change, a new `log_type` (or extended PROFILE) in the ingestion parser with the same validation treatment as existing fields, a DB column migration, and a card/roster display decision.
+- [ ] **Data analytics dashboard:** A dedicated view for exploring the collected history (`xp_history`) beyond the live leaderboard — direction/scope still to be decided.
+
+### Phase 3: Infrastructure Expansion
+- [x] Class colors (standard WoW class palette, used on both the dashboard cards and the roster table).
+- [ ] Level-up timestamps and server alerts.
+- [ ] Build a web UI configuration screen to toggle server visualization profiles (Classic Era, Hardcore, Progression).
+
+### Phase 4: Public/Self-Hosting Readiness
+Everything here is scoped for the current trusted-LAN deployment and deliberately deferred — revisit before exposing this to anyone outside the LAN.
+- [ ] Deploy to Coolify (self-hosted) and validate that players *not* on the local LAN can actually reach and post data to it over the internet — this is the point where the two items below stop being deferrable.
+- [x] Authenticate `/api/log-update` with a shared `INGESTION_TOKEN` (set as an env var on the server, passed as `--ingestion-token`/`ingestion_token` config on every watcher, sent as the `X-Ingestion-Token` header). Fails open — endpoint stays wide open exactly as before — when `INGESTION_TOKEN` is left unset, so a LAN-only deployment needs no config change. Verified end-to-end on an isolated test server/port: missing or wrong token → `401`, correct token → `200`, unset server-side token → `200` regardless of header. Set this before exposing the server beyond a trusted LAN — e.g. once it's on Coolify.
+- [x] Package `savedvars_watcher.py` and `log_watcher.py` into standalone `.exe`s via PyInstaller (`pyinstaller --onefile --console --name <name> --distpath dist --workpath build --specpath build <script>.py`) so remote friends don't need Python installed. Added auto-discovery (scans `<WoW Install>\_*_\WTF\Account\*\SavedVariables\LanDashboard.lua` across every drive letter) so a friend can just double-click the `.exe` with zero flags — one match is used automatically, multiple matches get a numbered picker, zero matches falls back to a plain-language prompt. Caught and fixed a real frozen-`.exe` bug in the process: both scripts located their config/state/backup files via `__file__`, which under PyInstaller resolves inside a temp extraction folder that's deleted on exit — every run silently lost its state and backup CSV. Fixed by resolving against `sys.executable` when frozen instead, verified by rebuilding and confirming `.savedvars_watcher_state.json`/`savedvars_watcher_backup.csv` actually land next to the `.exe` across repeated runs.
+- [x] `Dockerfile` added and verified locally: built the image, ran it with a mounted volume + `INGESTION_TOKEN`/`ROSTER_*` env vars, confirmed the dashboard serves and the ingestion token is enforced through the container exactly as it is running natively, then confirmed the SQLite DB survives both a `docker restart` and a full `docker rm` + recreate against the same named volume (the actual shape of a Coolify redeploy) — without a persistent volume, that step would silently wipe all progression data. See the Dockerfile deployment note below for the required Coolify volume setting.
+- [ ] HTTPS/WSS support, so the roster password and game data aren't sent in the clear.
+- [ ] Revisit player-identity keying (currently by character name alone). Blizzard's upcoming "WoW Forever" single-server model with first/last-name identity and PVP/PVE/RP as a per-character setting will change what a unique player key even looks like — confirm the actual model before building name-collision handling around the old Name+Realm assumption.
+- [ ] Guild-name identity has the same shape of problem: the guild filter dropdown treats guild name alone as unique, but two different guilds (one Horde, one Alliance) can share a name today, which would incorrectly merge them into one filter option. Needs disambiguation by (faction, guild name) — or may be moot once "WoW Forever" ships, if its single-server model makes guild names globally unique. Confirm before assuming either way.
+- [ ] Backend test suite (pytest + FastAPI's `TestClient`) covering the parsing/validation edge cases (CSV edge cases, length caps, malformed payloads) — deferred by choice for now; the highest-value, lowest-effort testing investment when picked back up.
+
+---
+
+## 🛠️ Step-by-Step Project Setup
+
+### 1. Installation
+Clone or download the project environment and deploy the primary system package pipeline:
+```bash
+pip install -r requirements.txt
+```
+Copy `.env.example` to `.env` and set a real `ROSTER_PASSWORD` — this protects the `/roster` management page from anyone else on the LAN. Without it set, requests to `/roster` and its editing endpoint fail rather than silently becoming public.
+
+Also set `DB_FILE` in `.env` to segment mock/beta/live data into separate SQLite files (e.g. `DB_FILE=beta.db`) — defaults to `lan_progression.db` if unset. Switching it doesn't touch whatever the previous value pointed at, so old data (like the beta run) just sits there for reference until you point somewhere new.
+
+If this server is reachable by anyone outside a trusted LAN (e.g. hosted on Coolify for remote friends), also set `INGESTION_TOKEN` in `.env` and give every player's watcher the same value via `--ingestion-token` — otherwise anyone who finds the URL can post fake data. Leave it unset for a LAN-only deployment; `/api/log-update` stays open exactly as before.
+
+### 2. Run the Framework Stack
+Fire up the central ingestion backend and database engine:
+```bash
+python main.py
+```
+
+### 3. Open the Spectator Interface
+Browse to `http://<server-ip>:5000/` from any machine on the LAN — the server hosts the dashboard directly, no file copying needed. Ensure the connection badge displays a green **"Live Connected"** status indicator.
+
+### 4. Forward Real Game Data
+On each player's machine, run the SavedVariables watcher pointed at the dashboard server's LAN IP — this is the one that actually delivers data during live play:
+```bash
+python savedvars_watcher.py --savedvars-path "C:\...\WTF\Account\YOURACCOUNT\SavedVariables\LanDashboard.lua" --server-url "http://<server-ip>:5000/api/log-update"
+```
+That file only appears after the addon has saved at least once (log in, then `/reload`). Use an IP address, not a hostname like `localhost` — on Windows, resolving `localhost` can add multi-second delay per connection.
+
+If the server has `INGESTION_TOKEN` set (a remote/Coolify deployment), add `--ingestion-token <the same value>` to every watcher invocation below — omit it entirely for a LAN-only server.
+
+Optionally, also run the chat-log watcher as a catch-all safety net (it only delivers a batch when someone fully exits the game, not during play, but costs nothing to leave running):
+```bash
+python log_watcher.py --log-path "C:\...\Logs\WoWChatLog.txt" --server-url "http://<server-ip>:5000/api/log-update"
+```
+
+### 5. Package the Watcher for Remote Friends (Optional)
+Friends who aren't on the LAN and don't have Python installed run a standalone `.exe` instead. The server hosts it for download on its `/setup` page, straight from the `downloads/` folder, so build it there:
+```bash
+pip install -r requirements-watcher.txt
+pyinstaller --onefile --noconsole --name savedvars_watcher --distpath downloads --workpath build --specpath build savedvars_watcher.py
+```
+`--noconsole` matters: the packaged watcher runs **in the system tray** with no window (a gold "4L" icon whose dot is green/amber/red for connected/waiting/needs-attention; right-click for status, open dashboard, open log, quit). Because there's no console, everything it says goes to `savedvars_watcher.log` next to the `.exe`, notable problems also raise a Windows notification, and it never prompts — with several WoW accounts it follows the most recently used one, and with none yet it keeps looking until the addon's first save. Only one copy can run at a time. To try tray mode from source: `python savedvars_watcher.py --tray` (run it from a scratch copy if you already use the watcher's state files in the project folder).
+
+**Rebuild this any time `savedvars_watcher.py` changes** — the server hosts whatever file is in `downloads/` and can't rebuild it itself (PyInstaller only produces binaries for the OS it runs on, and a Coolify container is Linux). The setup page shows the file's build date and SHA-256 so a stale copy is easy to spot. The `.exe` is **not committed** (`downloads/` is in `.gitignore`: it's 14 MB and every rebuild would stay in git history forever) — on the server it's uploaded into a mounted downloads directory instead (see "Deploy to Coolify"), and because the server reads it per request, replacing that file updates the download with no redeploy. If `downloads/` has no exe the site still works, and the page just greys out that button. (`log_watcher.py` can be packaged the same way, but it's the supplementary chat-log watcher and isn't offered on the setup page.) The addon needs no build step — its zip is generated from `LanDashboard/` on each download.
+
+Players don't need any of the following, since the setup page walks them through it, but for reference: double-clicking the `.exe` with no arguments triggers auto-discovery of the SavedVariables path (scanning `Program Files (x86)`, `Program Files`, the drive root and a `Games` folder on every drive; for anything else add `"savedvars_path"` to the config file). Settings come from `savedvars_watcher_config.json` next to the `.exe` (`server_url`, `ingestion_token`, optionally `savedvars_path`/`poll_interval`) or, when running the script, from `--server-url`/`--ingestion-token` flags. With a `DOWNLOAD_PASSPHRASE` set (below), the server builds that config file for friends automatically.
+
+### 6. Simulate a Testing Environment
+(Local only — `mock_generator.py` is git-ignored, so this applies on the machine where you keep it.) Launch the mock deployment tool to verify streaming functionality without needing the game running:
+```bash
+python mock_generator.py
+# or, to also test malformed-input handling:
+python mock_generator.py --chaos
+```
+
+### 7. Deploy to Coolify for Remote Friends (Optional)
+This repo includes a `Dockerfile` (built and verified locally: dashboard serves, `INGESTION_TOKEN` enforced, and the SQLite DB survives a container restart *and* a full remove-and-recreate against the same volume — the actual shape of a Coolify redeploy). A few things matter for a correct Coolify deployment:
+
+1. **Mount a persistent volume at `/app/data`** and set `DB_FILE=/app/data/lan_progression.db`. Without this, Coolify's container filesystem is ephemeral — every redeploy silently wipes all progression data, with no error to warn you it happened.
+2. **Set env vars through Coolify's UI, not a committed `.env`:** `ROSTER_USERNAME`, `ROSTER_PASSWORD`, `DB_FILE` (as above), and `INGESTION_TOKEN` (required now that the server is reachable from the internet — give every watcher the same value via `--ingestion-token`). Optionally `STALE_AFTER_MINUTES` (default 60) to tune when parked characters drop off the dashboard.
+3. **Lock the watcher download behind a passphrase you hand out.** Set `DOWNLOAD_PASSPHRASE` (a real passphrase — several random words) and `PUBLIC_URL` (e.g. `https://4l.noftz.net`) in Coolify. Then the bare `.exe` is no longer served: a friend opens `https://<your-domain>/setup`, enters the passphrase you sent them (Discord is fine), and downloads a zip containing the `.exe` plus a ready-made config with the server address and the ingestion token filled in — so they never see or type the token, and the token can't be obtained without the passphrase. Wrong guesses are rate-limited (10 per minute site-wide, then a one-minute lockout). The addon zip stays public since it's useless without the watcher. To rotate: change `DOWNLOAD_PASSPHRASE` to cut off new downloads; change `INGESTION_TOKEN` to cut off existing watchers (friends then re-download from the page). Leave `DOWNLOAD_PASSPHRASE` unset and the site keeps the older flow: public `.exe` plus a browser-side config generator where friends paste the token themselves. The token is only ever emitted through the passphrase gate — with no passphrase configured the bundle endpoint returns 404 for everything. Use an `https://` URL (Coolify issues the certificate); an `http://` one gets redirected and the redirected POSTs fail.
+4. **Put the watcher `.exe` in a mounted downloads directory.** The image contains the addon (`LanDashboard/`, zipped on demand) but not the `.exe`. In Coolify's persistent storage for the app, add a second mount — a host directory (or volume) mapped to **`/app/downloads`** — and upload `savedvars_watcher.exe` into that host directory over SFTP/SCP (plain FTP sends your login unencrypted; use it only if that's all the host offers). The name must be exactly `savedvars_watcher.exe`. Rebuilding the watcher later is then just replacing that one file: no redeploy, no git commit. Until it's there, `/setup` shows the watcher button greyed out and everything else works.
+
+If you test this Dockerfile locally on Windows via Git Bash, note that Git Bash rewrites unix-looking absolute paths (like `/app/data/lan_progression.db`) in command arguments into Windows paths before `docker` ever sees them — prefix the command with `MSYS_NO_PATHCONV=1` or it'll silently pass the wrong value.

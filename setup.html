@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Install the LAN Dashboard addon and watcher to put your WoW characters on the live leaderboard.">
+    <title>4L Dashboard Setup</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="stylesheet" href="/static/theme.css">
+    <style>
+        /* Page-specific: a single readable column instead of the dashboard's full-width grid */
+        .setup { max-width: 860px; margin: 0 auto; }
+        .setup h2 { font-size: 20px; margin: 0 0 8px; }
+        .setup h3 { font-size: 15px; margin: 22px 0 6px; }
+        .setup p { line-height: 1.6; margin: 0 0 12px; color: var(--text-color); max-width: 68ch; }
+        .setup .muted { color: var(--text-muted); }
+        .setup a { color: var(--accent-color); }
+        .setup ol, .setup ul { line-height: 1.6; padding-left: 22px; margin: 0 0 12px; max-width: 68ch; }
+        .setup li { margin-bottom: 6px; }
+
+        .lede { font-size: 16px; color: var(--text-muted); max-width: 62ch; }
+
+        /* Download buttons */
+        .downloads { display: flex; flex-wrap: wrap; gap: 12px; margin: 18px 0 8px; }
+        .dl-btn {
+            display: flex; flex-direction: column; gap: 2px;
+            background-color: var(--accent-color); color: #000;
+            text-decoration: none; border-radius: 8px; padding: 12px 20px;
+            min-width: 240px; flex: 1 1 240px; max-width: 360px;
+        }
+        .setup a.dl-btn { color: #000; }
+        .dl-btn strong { font-size: 15px; }
+        .dl-btn span { font-size: 12px; opacity: 0.75; }
+        .dl-btn:hover { filter: brightness(1.08); }
+        .dl-btn:focus-visible { outline: 2px solid var(--text-color); outline-offset: 2px; }
+        .dl-btn[aria-disabled="true"] { background-color: var(--card-color); color: var(--text-muted); border: 1px solid var(--border-color); pointer-events: none; }
+        .setup a.dl-btn[aria-disabled="true"] { color: var(--text-muted); }
+
+        /* How data gets from the game to the dashboard */
+        .flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; margin: 14px 0 0; }
+        .flow-step {
+            flex: 1 1 150px; background-color: var(--card-color); border: 1px solid var(--border-color);
+            border-radius: 8px; padding: 10px 12px; font-size: 13px; line-height: 1.4;
+        }
+        .flow-step b { display: block; color: var(--accent-color); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 2px; }
+        .flow-arrow { align-self: center; color: var(--text-muted); }
+
+        /* Steps: a real sequence, so numbering is information here */
+        .step { display: grid; grid-template-columns: 40px 1fr; gap: 14px; padding: 26px 0; border-top: 1px solid var(--card-color); }
+        /* Grid items default to min-width:auto, so a long nowrap path would stretch the whole column past the viewport */
+        .step > div { min-width: 0; }
+        .step-num {
+            width: 36px; height: 36px; border-radius: 50%;
+            border: 2px solid var(--accent-color); color: var(--accent-color);
+            display: flex; align-items: center; justify-content: center; font-weight: 700;
+        }
+        .path, code {
+            font-family: Consolas, "Cascadia Mono", monospace; font-size: 13px;
+            background-color: var(--card-color); border: 1px solid var(--border-color);
+            border-radius: 4px; padding: 1px 6px;
+        }
+        .path { display: block; padding: 8px 12px; margin: 8px 0 12px; overflow-x: auto; white-space: nowrap; max-width: 100%; }
+
+        /* Boxes */
+        .box { background-color: var(--card-color); border: 1px solid var(--border-color); border-radius: 10px; padding: 16px 18px; margin: 14px 0; }
+        .box > :last-child { margin-bottom: 0; }
+        .box-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 6px; }
+
+        .config-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 10px; }
+        .config-row input { flex: 1 1 260px; }
+        .btn-config { background-color: var(--accent-color); color: #000; font-weight: 700; border: none; border-radius: 6px; padding: 10px 16px; font-size: 14px; cursor: pointer; }
+        .btn-config:hover { filter: brightness(1.08); }
+        .btn-config:focus-visible { outline: 2px solid var(--text-color); outline-offset: 2px; }
+        #configMessage, #passphraseMessage { font-size: 13px; color: var(--horde-color); margin-top: 8px; min-height: 1em; }
+        #passphraseMessage.ok { color: var(--text-muted); }
+
+        table.cmds { border-collapse: collapse; width: 100%; max-width: 68ch; font-size: 14px; }
+        table.cmds td { padding: 8px 10px 8px 0; vertical-align: top; border-top: 1px solid var(--card-color); }
+        table.cmds td:first-child { white-space: nowrap; }
+
+        details { border-top: 1px solid var(--card-color); padding: 12px 0; }
+        details:last-of-type { border-bottom: 1px solid var(--card-color); }
+        summary { cursor: pointer; font-weight: 600; }
+        summary:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2px; }
+        details p { margin: 10px 0 0; }
+
+        .fineprint { font-size: 12px; color: var(--text-muted); word-break: break-all; }
+
+        @media (max-width: 520px) {
+            .step { grid-template-columns: 1fr; gap: 8px; }
+            .flow-arrow { display: none; }
+        }
+    </style>
+</head>
+<body>
+<div class="container setup">
+    <header>
+        <h1>4L Dashboard</h1>
+        <div class="header-right">
+            <a class="nav-link" href="/">Back to Dashboard</a>
+            <a class="nav-link" href="/roster">Manage Roster</a>
+        </div>
+    </header>
+
+    <h2>Get your characters on the leaderboard</h2>
+    <p class="lede">Two small pieces run on your own PC: an addon inside WoW that records your progress, and a helper program &mdash; the watcher &mdash; that sits quietly in your system tray and forwards it to this dashboard. Setup takes about five minutes.</p>
+
+    <div class="downloads">
+        <a class="dl-btn" id="addonDownload" href="/download/LanDashboard.zip">
+            <strong>1. Download the addon</strong>
+            <span id="addonMeta">LanDashboard.zip</span>
+        </a>
+        <a class="dl-btn" id="watcherDownload" href="/download/savedvars_watcher.exe">
+            <strong>2. Download the watcher</strong>
+            <span id="watcherMeta">savedvars_watcher.exe &middot; Windows</span>
+        </a>
+    </div>
+
+    <div class="flow" aria-label="How data reaches the dashboard">
+        <div class="flow-step"><b>Addon</b>Records quests, levels and zones as you play</div>
+        <div class="flow-arrow" aria-hidden="true">&rarr;</div>
+        <div class="flow-step"><b>WoW</b>Saves them to a file when your UI reloads or you log out</div>
+        <div class="flow-arrow" aria-hidden="true">&rarr;</div>
+        <div class="flow-step"><b>Watcher</b>Reads that file and sends new events here</div>
+        <div class="flow-arrow" aria-hidden="true">&rarr;</div>
+        <div class="flow-step"><b>Dashboard</b>Updates live for everyone watching</div>
+    </div>
+
+    <section class="step">
+        <div class="step-num">1</div>
+        <div>
+            <h2>Install the addon</h2>
+            <ol>
+                <li>Download the addon above and unzip it. You'll get a folder named <code>LanDashboard</code>.</li>
+                <li>Copy that folder into your WoW <code>AddOns</code> folder, for the game version you play:
+                    <span class="path">C:\Program Files (x86)\World of Warcraft\&lt;version&gt;\Interface\AddOns\</span>
+                    <code>&lt;version&gt;</code> is the folder that already exists in your install, such as <code>_classic_era_</code> or <code>_classic_beta_</code>. You should end up with <code>...\AddOns\LanDashboard\LanDashboard.toc</code>.
+                </li>
+                <li>Start WoW. On the character select screen, open <b>AddOns</b> and make sure <b>LAN Dashboard Data Streamer</b> is ticked. If it's marked out of date, tick <b>Load out of date AddOns</b>.</li>
+            </ol>
+        </div>
+    </section>
+
+    <section class="step" id="watcher-download">
+        <div class="step-num">2</div>
+        <div>
+            <h2>Set up the watcher</h2>
+
+            <!-- Shown when this server locks the watcher behind a passphrase -->
+            <div id="gatedStep" hidden>
+                <ol>
+                    <li>Enter the passphrase you were given (ask whoever runs this dashboard) and download the watcher. It arrives as a zip that already contains its configuration &mdash; there's nothing to edit.</li>
+                </ol>
+                <form class="box" id="passphraseForm">
+                    <div class="box-label">Download the watcher</div>
+                    <div class="config-row">
+                        <input type="text" id="passphraseInput" placeholder="Passphrase" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Passphrase" required>
+                        <button type="submit" class="btn-config" id="passphraseButton">Download watcher</button>
+                    </div>
+                    <div id="passphraseMessage" role="alert"></div>
+                </form>
+                <ol start="2">
+                    <li>Unzip it anywhere &mdash; right-click the zip and choose <b>Extract All</b>. Keep the files together in that folder.</li>
+                </ol>
+            </div>
+
+            <!-- Shown on servers with no passphrase: download the .exe and build the config here -->
+            <div id="openStep">
+            <ol>
+                <li>Make a folder for it anywhere &mdash; for example <code>Documents\LanDashboard Watcher</code> &mdash; and put the downloaded <code>savedvars_watcher.exe</code> in it.</li>
+                <li>Create its config file below and save it <b>in that same folder</b>, keeping the name <code>savedvars_watcher_config.json</code>. This tells the watcher where this dashboard lives.</li>
+            </ol>
+
+            <div class="box">
+                <div class="box-label">Your config file</div>
+                <p class="muted">Server address: <code id="serverAddress"></code></p>
+                <div id="tokenRow" hidden>
+                    <p>This dashboard requires an access token. Paste the one you were given &mdash; it stays in your browser and is only written into the file you download.</p>
+                </div>
+                <div class="config-row">
+                    <input type="text" id="tokenInput" placeholder="Access token" autocomplete="off" spellcheck="false" aria-label="Access token" hidden>
+                    <button type="button" class="btn-config" id="configButton">Download config file</button>
+                </div>
+                <div id="configMessage" role="alert"></div>
+            </div>
+            </div>
+
+            <p class="muted">Windows may say <b>"Windows protected your PC"</b> the first time you run the watcher, because it isn't code-signed. Choose <b>More info</b>, then <b>Run anyway</b>. Its checksum is at the bottom of this page if you want to verify the download.</p>
+        </div>
+    </section>
+
+    <section class="step">
+        <div class="step-num">3</div>
+        <div>
+            <h2>Play and sync</h2>
+            <ol>
+                <li>Log in to your character. The first time a character is seen, a <b>Sync LAN Dashboard</b> button appears at the top of your screen. Click it &mdash; this reloads your UI, which is what makes WoW write the addon's data to disk. (Closed it? Just type <code>/reload</code>.)</li>
+                <li>Start the watcher by double-clicking <code>savedvars_watcher.exe</code>. No window opens &mdash; it runs in your <b>system tray</b> (bottom-right of the taskbar; click the <b>^</b> arrow if you don't see the gold <b>4L</b> icon). It finds the addon's file on its own; if you start it before that first save, it just waits and picks the file up within about half a minute.</li>
+                <li>Leave it running while you play. Your character shows up on the dashboard within a few seconds. The dot on the icon shows how it's doing &mdash; <b>green</b> connected, <b>amber</b> waiting or retrying, <b>red</b> needs attention &mdash; and right-clicking it shows the details, opens the dashboard or the log, or quits it.</li>
+            </ol>
+            <h3>Why it arrives in bursts</h3>
+            <p>WoW addons can't send anything over the internet, and WoW only writes the addon's data to disk when the UI reloads or you log out. So the addon offers the Sync button at good moments &mdash; after a few quests or a level-up, when you take a flight, go AFK, or hit a loading screen. Click it, dismiss it with the X, or type <code>/reload</code> whenever you like. Logging out syncs everything too.</p>
+            <h3>Addon commands</h3>
+            <table class="cmds">
+                <tr><td><code>/ldb</code></td><td>Shows your sync status: pending score and how many events are queued.</td></tr>
+                <tr><td><code>/ldb sync</code></td><td>Shows the Sync button right now.</td></tr>
+                <tr><td><code>/ldb forget</code></td><td>Makes the addon treat your characters as new, so the next login prompts to sync again. Only needed if the dashboard was reset.</td></tr>
+            </table>
+        </div>
+    </section>
+
+    <section class="step">
+        <div class="step-num" aria-hidden="true">?</div>
+        <div>
+            <h2>Troubleshooting</h2>
+            <details>
+                <summary>I don't see the tray icon</summary>
+                <p>Windows tucks new tray icons under the <b>^</b> arrow at the right of the taskbar. Click it to find the gold <b>4L</b>, and drag it onto the taskbar if you want it always visible. Starting the watcher a second time does nothing except tell you it's already running.</p>
+            </details>
+            <details>
+                <summary>The icon has an amber dot and says "Waiting for the addon's first save"</summary>
+                <p>The addon hasn't saved its data file yet. Log in, click the Sync button (or type <code>/reload</code>) &mdash; the watcher notices within about half a minute. If it never does, your WoW is probably installed somewhere unusual: add a line like <code>"savedvars_path": "D:\\Games\\World of Warcraft\\_classic_era_\\WTF\\Account\\&lt;your account&gt;\\SavedVariables\\LanDashboard.lua"</code> to <code>savedvars_watcher_config.json</code>.</p>
+            </details>
+            <details>
+                <summary>My character isn't on the dashboard</summary>
+                <p>Check that the tray icon's dot is green and that you've synced since logging in. Right-click it and choose <b>Open log file</b> &mdash; after a sync you should see a line like <code>2 new event(s) queued for delivery</code>. On the dashboard, the <b>Activity</b> filter hides characters that haven't sent anything for <span id="staleMinutes">a while</span> &mdash; switch it to <b>Show all</b> to see them. A character only appears once it has synced at least once.</p>
+            </details>
+            <details>
+                <summary>The icon is red, or I got a "can't reach the dashboard" notification</summary>
+                <p>Red means the dashboard refused the access token: <span id="tokenHelp">the token in <code>savedvars_watcher_config.json</code> is wrong or out of date</span>. Amber with "Can't reach the server" means a connection problem &mdash; check your internet. Either way the watcher keeps retrying and remembers what it hasn't sent, so nothing is lost meanwhile.</p>
+            </details>
+            <details>
+                <summary>I have more than one WoW account or install</summary>
+                <p>The watcher follows the one whose save file changed most recently &mdash; normally the one you're playing. To pin it to a specific account, add its <code>savedvars_path</code> to <code>savedvars_watcher_config.json</code> as above.</p>
+            </details>
+            <details>
+                <summary>Windows or my antivirus blocks the watcher</summary>
+                <p>The watcher is a small Python program packaged into a single <code>.exe</code> and isn't code-signed, which some antivirus tools flag by default. Compare the SHA-256 checksum below against the <code>savedvars_watcher.exe</code> you unzipped, and allow it if they match.</p>
+            </details>
+            <details>
+                <summary>How do I stop it, or start it with Windows?</summary>
+                <p>Right-click the tray icon and choose <b>Quit</b>. You only need it running while you want events delivered: the addon keeps its queue in your game's saved data and the watcher remembers what it has already sent, so it picks up where it left off next time. To have it start automatically, press <b>Win + R</b>, type <code>shell:startup</code>, and put a shortcut to <code>savedvars_watcher.exe</code> in the folder that opens.</p>
+            </details>
+        </div>
+    </section>
+
+    <p class="fineprint" id="fileInfo"></p>
+</div>
+
+<script>
+    // Everything here is progressive: the downloads and instructions work
+    // without it. It fills in versions/checksums, hides the token field when
+    // this server doesn't require one, and builds the config file locally.
+    const CONFIG_FILENAME = "savedvars_watcher_config.json";
+    const serverUrl = `${window.location.origin}/api/log-update`;
+    let setupInfo = { ingestion_token_required: false };
+
+    function formatMegabytes(bytes) {
+        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    function saveBlob(blob, filename) {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+    }
+
+    document.getElementById("serverAddress").textContent = window.location.origin;
+
+    fetch("/api/setup-info")
+        .then((response) => response.json())
+        .then((info) => {
+            setupInfo = info;
+
+            if (info.addon && info.addon.version) {
+                document.getElementById("addonMeta").textContent = `LanDashboard.zip \u00b7 version ${info.addon.version}`;
+            }
+
+            // With a passphrase set the server refuses the bare .exe, so the
+            // page shows the passphrase form instead of the manual steps.
+            const gated = Boolean(info.passphrase_required);
+            document.getElementById("gatedStep").hidden = !gated;
+            document.getElementById("openStep").hidden = gated;
+            if (gated) {
+                document.getElementById("tokenHelp").textContent =
+                    "your copy's configuration is out of date, so download the watcher again from this page";
+            }
+
+            const watcherButton = document.getElementById("watcherDownload");
+            if (info.watcher) {
+                const size = formatMegabytes(info.watcher.size);
+                document.getElementById("watcherMeta").textContent = gated
+                    ? `Passphrase required \u00b7 Windows \u00b7 ${size}`
+                    : `savedvars_watcher.exe \u00b7 Windows \u00b7 ${size}`;
+                if (gated) watcherButton.setAttribute("href", "#watcher-download");
+            } else {
+                watcherButton.setAttribute("aria-disabled", "true");
+                watcherButton.removeAttribute("href");
+                document.getElementById("watcherMeta").textContent = "Not available on this server yet";
+            }
+
+            if (info.ingestion_token_required) {
+                document.getElementById("tokenRow").hidden = false;
+                document.getElementById("tokenInput").hidden = false;
+            }
+
+            if (info.stale_after_minutes) {
+                const minutes = Math.round(info.stale_after_minutes);
+                document.getElementById("staleMinutes").textContent = `${minutes} minute${minutes === 1 ? "" : "s"}`;
+            }
+
+            const parts = [];
+            if (info.addon && info.addon.version) parts.push(`Addon version ${info.addon.version}.`);
+            if (info.watcher) {
+                const built = new Date(info.watcher.built).toLocaleDateString();
+                parts.push(`savedvars_watcher.exe built ${built}, SHA-256: ${info.watcher.sha256}`);
+            }
+            document.getElementById("fileInfo").textContent = parts.join(" ");
+        })
+        .catch(() => { /* leave the static defaults in place */ });
+
+    document.getElementById("configButton").addEventListener("click", () => {
+        const message = document.getElementById("configMessage");
+        message.textContent = "";
+
+        const config = { server_url: serverUrl };
+        if (setupInfo.ingestion_token_required) {
+            const token = document.getElementById("tokenInput").value.trim();
+            if (!token) {
+                message.textContent = "Enter the access token you were given first.";
+                return;
+            }
+            config.ingestion_token = token;
+        }
+
+        saveBlob(new Blob([JSON.stringify(config, null, 2) + "\n"], { type: "application/json" }), CONFIG_FILENAME);
+    });
+
+    document.getElementById("passphraseForm").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const message = document.getElementById("passphraseMessage");
+        const button = document.getElementById("passphraseButton");
+        message.textContent = "";
+        message.className = "";
+        button.disabled = true;
+        button.textContent = "Preparing...";
+        try {
+            const response = await fetch("/api/watcher-bundle", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ passphrase: document.getElementById("passphraseInput").value }),
+            });
+            if (!response.ok) {
+                let detail = "Something went wrong. Try again.";
+                try { detail = (await response.json()).detail || detail; } catch (e) { /* not JSON */ }
+                message.textContent = detail;
+                return;
+            }
+            saveBlob(await response.blob(), "LanDashboardWatcher.zip");
+            message.className = "ok";
+            message.textContent = "Downloaded LanDashboardWatcher.zip — unzip it, then start the watcher after your first sync (step 3).";
+        } catch (e) {
+            message.textContent = "Couldn't reach the server. Check your connection and try again.";
+        } finally {
+            button.disabled = false;
+            button.textContent = "Download watcher";
+        }
+    });
+</script>
+</body>
+</html>

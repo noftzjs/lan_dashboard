@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>4L Dashboard</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="stylesheet" href="/static/theme.css">
+    <style>
+        /* Page-specific: the spectator card grid (roster.html uses a table instead) */
+        .player-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+            gap: 14px;
+        }
+        .player-card {
+            background-color: var(--card-color);
+            border-radius: 10px;
+            padding: 14px 16px;
+            border-left: 4px solid var(--neutral-color);
+            transition: background-color 0.15s ease;
+        }
+        .player-card:hover { background-color: var(--card-color-hover); }
+        .player-card.faction-alliance-border { border-left-color: var(--alliance-color); }
+        .player-card.faction-horde-border { border-left-color: var(--horde-color); }
+
+        /* Top-3 podium, only shown when sorted by level — pulled out of the
+           regular grid entirely so it reads as a distinct tier at a glance,
+           not just a differently-colored card in the middle of the pack. */
+        .podium-section { margin-bottom: 26px; }
+        .podium-heading {
+            text-align: center;
+            font-size: 13px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--text-muted);
+            margin-bottom: 14px;
+        }
+        .podium-row {
+            display: flex;
+            justify-content: center;
+            align-items: flex-end;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin-bottom: 22px;
+        }
+        .podium-divider { border: none; border-top: 1px solid var(--border-color); margin: 0 0 22px; }
+        .podium-card { width: 260px; flex-shrink: 0; }
+        .podium-card.rank-1 {
+            order: 2;
+            width: 290px;
+            padding-bottom: 22px;
+            box-shadow: 0 0 0 1px rgba(255, 215, 0, 0.7), 0 0 24px rgba(255, 215, 0, 0.18);
+        }
+        .podium-card.rank-1 .name { font-size: 19px; }
+        .podium-card.rank-2 { order: 1; box-shadow: 0 0 0 1px rgba(200, 205, 214, 0.6), 0 0 18px rgba(200, 205, 214, 0.12); }
+        .podium-card.rank-3 { order: 3; box-shadow: 0 0 0 1px rgba(205, 127, 50, 0.65), 0 0 18px rgba(205, 127, 50, 0.12); }
+
+        .card-top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+        .rank { font-weight: bold; font-size: 13px; color: var(--text-muted); flex-shrink: 0; }
+        .name { font-weight: 700; font-size: 17px; overflow-wrap: anywhere; }
+        .level-badge {
+            margin-left: auto;
+            background-color: var(--accent-color);
+            color: #000;
+            font-weight: bold;
+            text-align: center;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 13px;
+            flex-shrink: 0;
+        }
+
+        .meta-line {
+            font-size: 12.5px;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+            /* Was flex-wrap, which let a long guild/zone name wrap this to
+               two lines — on the podium specifically, that made whichever
+               flanking card had the longest guild name grow taller than
+               the (deliberately bigger) center card, since the row bottom-
+               aligns them. Single line + ellipsis keeps every card's
+               height predictable regardless of content length. */
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .meta-line .sep { opacity: 0.5; }
+
+        .xp-container { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+        .xp-bar-bg { background-color: var(--bg-color); border-radius: 4px; height: 10px; overflow: hidden; width: 100%; }
+        .xp-bar-fill { background-color: var(--bar-color); height: 100%; width: 0%; transition: width 0.4s ease; }
+        .xp-text { font-size: 11px; text-align: right; color: var(--text-muted); }
+
+        .tag-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <h1>4L Dashboard</h1>
+        <div class="header-right">
+            <span id="playerCount"></span>
+            <a class="nav-link" href="/setup">Setup &amp; Downloads</a>
+            <a class="nav-link" href="/roster">Manage Roster</a>
+            <div id="status" class="disconnected">Connecting...</div>
+        </div>
+    </header>
+
+    <div class="controls">
+        <input class="grow" type="text" id="searchBar" placeholder="Search character name..." oninput="renderDashboard()">
+        <select id="guildFilter" onchange="renderDashboard()">
+            <option value="">All Guilds</option>
+            <!-- Populated from currently-present guilds at render time, see below -->
+        </select>
+        <select id="factionFilter" onchange="renderDashboard()">
+            <option value="">All Factions</option>
+            <option value="Alliance">Alliance</option>
+            <option value="Horde">Horde</option>
+        </select>
+        <select id="classFilter" onchange="renderDashboard()">
+            <option value="">All Classes</option>
+            <!-- Populated from CLASS_COLORS at load, see below -->
+        </select>
+        <select id="activityFilter" onchange="renderDashboard()">
+            <option value="active">Active only</option>
+            <option value="all">Show all (incl. idle)</option>
+        </select>
+        <select id="sortBy" onchange="renderDashboard()">
+            <option value="level">Sort by Level</option>
+            <option value="name">Sort Alphabetically</option>
+        </select>
+    </div>
+
+    <div id="podiumSection" class="podium-section" hidden>
+        <div class="podium-heading">Top Performers</div>
+        <div id="podiumRow" class="podium-row"></div>
+        <hr class="podium-divider">
+    </div>
+
+    <div id="playerList" class="player-list">
+        <!-- Rendered dynamically by JavaScript -->
+    </div>
+</div>
+
+<script src="/static/vendor/morphdom-umd.min.js"></script>
+<script src="/static/dashboard.js"></script>
+<script>
+    // Stream link / tags are edited on the Roster Manager page only — this
+    // view is read-only display, which also means no input fields here can
+    // ever fight with a live re-render for focus.
+
+    // The class list is fixed (unlike guilds, which are arbitrary free
+    // text), so populate the dropdown once from the same source used for
+    // class colors instead of hardcoding the list a second time in HTML.
+    const classFilterEl = document.getElementById("classFilter");
+    Object.keys(CLASS_COLORS).forEach(token => {
+        const opt = document.createElement("option");
+        opt.value = token;
+        opt.textContent = token;
+        classFilterEl.appendChild(opt);
+    });
+
+    // variant "podium" renders one of the top-3 cards (larger, gold/silver/
+    // bronze glow, no separate rank medal needed since the podium section
+    // itself is the "these are special" signal); otherwise a normal grid
+    // card. rank is the player's absolute rank (1-based) either way.
+    function buildCard(player, rank, variant) {
+        const factionClass = player.faction === "Alliance" ? "faction-alliance-border"
+            : player.faction === "Horde" ? "faction-horde-border" : "";
+        const factionTextClass = player.faction === "Alliance" ? "faction-alliance"
+            : player.faction === "Horde" ? "faction-horde" : "";
+        const classColor = CLASS_COLORS[player.class] || "var(--text-color)";
+        const streamHref = safeUrl(player.stream_url);
+        const tags = player.tags || [];
+        const podiumClass = variant === "podium" ? `podium-card rank-${rank}` : "";
+
+        const metaParts = [];
+        const metaPlain = [];
+        if (player.faction) { metaParts.push(`<span class="${factionTextClass}">${escapeHtml(player.faction)}</span>`); metaPlain.push(player.faction); }
+        if (player.class) { metaParts.push(`<span style="color:${classColor}">${escapeHtml(player.class)}</span>`); metaPlain.push(player.class); }
+        if (player.guild) { metaParts.push(escapeHtml(player.guild)); metaPlain.push(player.guild); }
+        if (player.current_zone) { metaParts.push(`<span title="Current zone">📍 ${escapeHtml(player.current_zone)}</span>`); metaPlain.push(player.current_zone); }
+        const metaLine = metaParts.length
+            ? metaParts.join(' <span class="sep">·</span> ')
+            : '<span class="sep">No profile data yet</span>';
+        // The line itself can now truncate (see .meta-line CSS) — the title
+        // attribute keeps the full text one hover away instead of just gone.
+        const metaTitle = escapeHtml(metaPlain.join(" · "));
+
+        // Just a channel link — no live/offline claim, since we have no way
+        // to check that without polling the platform's API.
+        const streamPlatform = streamHref ? detectStreamPlatform(streamHref) : null;
+        const streamLabel = { twitch: "Twitch", youtube: "YouTube", kick: "Kick", other: "their stream" }[streamPlatform];
+        const streamBadge = streamHref
+            ? `<a class="stream-badge" href="${escapeHtml(streamHref)}" target="_blank" rel="noopener noreferrer" title="Watch on ${streamLabel}">
+                 ${STREAM_PLATFORM_ICONS[streamPlatform]}
+               </a>`
+            : "";
+
+        const tagChips = tags.map(t => `<span class="tag-chip" title="${escapeHtml(t)}">${escapeHtml(t)}</span>`).join("");
+        const safeName = escapeHtml(player.name);
+        const cardId = playerElementId("card", player.name);
+
+        return `
+            <div id="${cardId}" class="player-card ${factionClass} ${podiumClass}">
+                <div class="card-top">
+                    <span class="rank">#${rank}</span>
+                    <span class="name" style="color:${classColor}">${safeName}</span>
+                    ${streamBadge}
+                    <span class="level-badge">Lvl ${player.level}</span>
+                </div>
+                <div class="meta-line" title="${metaTitle}">${metaLine}</div>
+                <div class="xp-container">
+                    <div class="xp-bar-bg">
+                        <div class="xp-bar-fill" style="width: ${player.pct}%"></div>
+                    </div>
+                    <div class="xp-text">${player.current_xp.toLocaleString()} / ${player.max_xp.toLocaleString()} (${player.pct}%)</div>
+                </div>
+                ${tagChips ? `<div class="tag-row">${tagChips}</div>` : ""}
+            </div>
+        `;
+    }
+
+    // Guilds are arbitrary free text, not a fixed set like classes, so this
+    // rebuilds the option list from whoever's actually present rather than
+    // hardcoding it. Options are based on all validly-profiled players
+    // (ignoring the OTHER active filters), so switching faction/class
+    // filters doesn't make guild options disappear out from under you.
+    // Preserves the current selection if it's still a valid option, so
+    // picking a guild doesn't get silently undone by the next re-render.
+    function updateGuildOptions(players) {
+        const select = document.getElementById("guildFilter");
+        const currentValue = select.value;
+        const guilds = [...new Set(players.map(p => p.guild).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+        select.innerHTML = '<option value="">All Guilds</option>' +
+            guilds.map(g => `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`).join("");
+        if (guilds.includes(currentValue)) {
+            select.value = currentValue;
+        }
+    }
+
+    // Process Filters and Render UI
+    function renderDashboard() {
+        const container = document.getElementById("playerList");
+        const searchQuery = document.getElementById("searchBar").value.toLowerCase();
+        const sortBy = document.getElementById("sortBy").value;
+        const factionFilter = document.getElementById("factionFilter").value;
+        const classFilter = document.getElementById("classFilter").value;
+
+        let players = Object.keys(playerData).map(name => ({
+            name: name,
+            ...playerData[name]
+        }));
+
+        // Parked characters (a bank alt someone logged into and left) are
+        // hidden by default once they've gone STALE_AFTER_MINUTES without any
+        // event; the activity filter's "Show all" brings them back. Counted
+        // before search/filters so the label reflects everyone who's idle,
+        // not just whoever matches the current search.
+        const activityFilter = document.getElementById("activityFilter");
+        const idleCount = players.filter(isStale).length;
+        const activeLabel = idleCount ? `Active only (${idleCount} idle hidden)` : "Active only";
+        const activeOption = activityFilter.options[0];
+        if (activeOption.textContent !== activeLabel) activeOption.textContent = activeLabel;
+        if (activityFilter.value !== "all") players = players.filter(p => !isStale(p));
+
+        updateGuildOptions(players);
+        const guildFilter = document.getElementById("guildFilter").value;
+
+        if (searchQuery) {
+            players = players.filter(p => p.name.toLowerCase().includes(searchQuery));
+        }
+        if (guildFilter) {
+            players = players.filter(p => p.guild === guildFilter);
+        }
+        if (factionFilter) {
+            players = players.filter(p => p.faction === factionFilter);
+        }
+        if (classFilter) {
+            players = players.filter(p => p.class === classFilter);
+        }
+
+        if (sortBy === "level") {
+            players.sort((a, b) => b.level - a.level || b.pct - a.pct);
+        } else if (sortBy === "name") {
+            players.sort((a, b) => a.name.localeCompare(b.name));
+        }
+
+        document.getElementById("playerCount").textContent =
+            players.length ? `${players.length} player${players.length === 1 ? "" : "s"}` : "";
+
+        if (players.length === 0) {
+            document.getElementById("podiumSection").hidden = true;
+            const emptyMessage = idleCount && activityFilter.value !== "all"
+                ? `No active characters right now — ${idleCount} idle hidden. Choose "Show all" to see them.`
+                : "No characters leveling yet...";
+            container.innerHTML = `<div style="grid-column: 1 / -1; text-align:center; padding:40px; color:#666;">${emptyMessage}</div>`;
+            return;
+        }
+
+        // Podium only makes sense when ranked by level — alphabetical
+        // "rank #1" isn't a leader, it's just "starts with A." Whoever's
+        // top 3 within the current filters/search gets featured; the grid
+        // below just continues the ranking from #4.
+        const podiumSection = document.getElementById("podiumSection");
+        const showPodium = sortBy === "level";
+        podiumSection.hidden = !showPodium;
+
+        const podiumPlayers = showPodium ? players.slice(0, 3) : [];
+        const gridPlayers = showPodium ? players.slice(3) : players;
+        const gridStartRank = showPodium ? 4 : 1;
+
+        if (showPodium) {
+            const podiumHtml = podiumPlayers.map((player, i) => buildCard(player, i + 1, "podium")).join("");
+            morphChildren(document.getElementById("podiumRow"), podiumHtml);
+        }
+
+        const gridHtml = gridPlayers.map((player, i) => buildCard(player, gridStartRank + i, "grid")).join("");
+        morphChildren(container, gridHtml);
+    }
+
+    connectWebSocket(renderDashboard);
+
+    // Staleness is a function of time, not of messages — without this a
+    // card would only disappear the next time some other player's event
+    // happened to trigger a render.
+    setInterval(renderDashboard, 30000);
+</script>
+</body>
+</html>
