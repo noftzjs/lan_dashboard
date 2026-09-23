@@ -416,6 +416,23 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                 """, (payload.timestamp, player_name, log_type, quest_id, xp_reward,
                       event_time.isoformat() if event_time else None))
 
+            elif log_type == "DEATH":
+                # level,zone — zone is the remainder, so a comma in a zone name
+                # (none today, but the same rule as guild names) stays intact.
+                level_str, _, death_zone = rest.partition(",")
+                level = int(level_str.strip())
+                death_zone = death_zone.strip()
+                if not (LEVEL_MIN <= level <= LEVEL_MAX):
+                    raise ValueError(f"Level {level} outside valid range {LEVEL_MIN}-{LEVEL_MAX}")
+                if len(death_zone) > ZONE_MAX_LENGTH:
+                    raise ValueError(f"Zone name too long ({len(death_zone)} chars): {death_zone!r}")
+                player_states.setdefault(player_name, default_state())
+                await db.execute("""
+                    INSERT INTO xp_history (timestamp, player, log_type, level, event_time)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (payload.timestamp, player_name, log_type, level,
+                      event_time.isoformat() if event_time else None))
+
             else:
                 raise ValueError(f"Unknown log_type {log_type!r} in payload: {payload.data!r}")
 
@@ -742,6 +759,11 @@ async def get_analytics():
             timed_rows = await cursor.fetchall()
         async with db.execute("SELECT COUNT(*) AS n FROM xp_history") as cursor:
             history_total = (await cursor.fetchone())["n"]
+        async with db.execute(
+            "SELECT player, COUNT(*) AS deaths FROM xp_history WHERE log_type='DEATH' GROUP BY player"
+        ) as cursor:
+            death_rows = await cursor.fetchall()
+    deaths = {row["player"]: row["deaths"] for row in death_rows}
 
     gained = summarise_xp_rows(xp_rows)
 
@@ -774,6 +796,7 @@ async def get_analytics():
             "zone": state.get("current_zone"),
             "idle_seconds": idle_seconds(state),
             "quests": quest_count.get(name, 0),
+            "deaths": deaths.get(name, 0),
             "quest_xp": quests_xp,
             # Quest XP is reported by the game, while the total is inferred from
             # XP snapshots, so a character whose quest turn-ins arrived but
@@ -813,6 +836,7 @@ async def get_analytics():
             "quests": len(all_rewards),
             "quest_xp": banded_total,
             "xp_recorded": sum(gained.values()),
+            "deaths": sum(deaths.values()),
         },
         "players": players,
         "quest_bands": quest_bands,

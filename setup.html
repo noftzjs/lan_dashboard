@@ -85,6 +85,12 @@
         details p { margin: 10px 0 0; }
 
         .fineprint { font-size: 12px; color: var(--text-muted); word-break: break-all; }
+        /* The in-game screenshot: shown at its natural size, with width/height
+           on the tag so the step doesn't reflow as it loads. */
+        .shot {
+            display: block; margin: 10px 0; border-radius: 6px;
+            border: 1px solid var(--border-color); max-width: 100%; height: auto;
+        }
 
         @media (max-width: 520px) {
             .step { grid-template-columns: 1fr; gap: 8px; }
@@ -195,7 +201,10 @@
         <div>
             <h2>Play and sync</h2>
             <ol>
-                <li>Log in to your character. The first time a character is seen, a <b>Sync LAN Dashboard</b> button appears at the top of your screen. Click it &mdash; this reloads your UI, which is what makes WoW write the addon's data to disk. (Closed it? Just type <code>/reload</code>.)</li>
+                <li>Log in to your character. The first time a character is seen, this button appears at the top of your screen:
+                    <img class="shot" src="/static/sync_screenshot.png" alt="The in-game Sync LAN Dashboard button, with a small X beside it to dismiss it."
+                         width="327" height="75" loading="lazy">
+                    Click it &mdash; that reloads your UI, which is what makes WoW write the addon's data to disk. The <b>X</b> beside it just dismisses it; it comes back at the next good moment. (Closed it and want it now? Type <code>/reload</code>.)</li>
                 <li>Start the watcher by double-clicking <code>savedvars_watcher.exe</code>. No window opens &mdash; it runs in your <b>system tray</b> (bottom-right of the taskbar; click the <b>^</b> arrow if you don't see the gold <b>4L</b> icon). It finds the addon's file on its own; if you start it before that first save, it just waits and picks the file up within about half a minute.</li>
                 <li>Leave it running while you play. Your character shows up on the dashboard within a few seconds. The dot on the icon shows how it's doing &mdash; <b>green</b> connected, <b>amber</b> waiting or retrying, <b>red</b> needs attention &mdash; and right-clicking it shows the details, opens the dashboard or the log, or quits it.</li>
             </ol>

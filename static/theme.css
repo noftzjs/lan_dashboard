@@ -1,13 +1,21 @@
 /* Shared design tokens and components used by both index.html (spectator
    dashboard) and roster.html (operator roster manager). Page-specific
    layout (card grid vs. table) stays inline in each page. */
+/* Palette shifted darker/denser in the raider.io direction — near-black
+   plane, panels that read as panels, and a third ink level for the small
+   capitalised labels that layout leans on. Every page shares these, so the
+   restyle lands on the roster, setup and analytics pages too. */
 :root {
-    --bg-color: #121214;
-    --card-color: #1e1e24;
-    --card-color-hover: #24242c;
-    --border-color: #33333c;
-    --text-color: #f0f0f5;
-    --text-muted: #9a9aa5;
+    --bg-color: #0e0e11;
+    --card-color: #17171c;
+    --card-color-hover: #1d1d24;
+    --border-color: #26262f;
+    --text-color: #ececf2;
+    --text-muted: #8d8d99;
+    /* Third ink level, for the small capitalised labels. Measured, not eyeballed:
+       4.53:1 on the panel colour, which clears the 4.5:1 bar these need at
+       10-11px. The darker grey this started as came in at 2.97:1. */
+    --text-dim: #7f7f8d;
     --accent-color: #f3a73c;
     --bar-color: #4a8fe7;
     --alliance-color: #4a8fe7;
@@ -38,7 +46,10 @@ header {
     margin-bottom: 20px;
 }
 h1 { margin: 0; font-size: 22px; color: var(--accent-color); }
-.header-right { display: flex; align-items: center; gap: 12px; }
+/* Wraps: this row carries the nav links, the view switch and the connection
+   badge, which together outrun a phone's width — without wrapping they push
+   the whole page sideways. */
+.header-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
 #playerCount { font-size: 13px; color: var(--text-muted); }
 .nav-link {
     color: var(--text-muted);
@@ -106,6 +117,34 @@ input:focus, select:focus { outline: 1px solid var(--accent-color); }
 }
 .stream-badge:hover { transform: scale(1.1); }
 .stream-badge svg { width: 100%; height: 100%; display: block; }
+
+/* Small capitalised section label — the rule that carries the raider.io
+   feel. Shared so every page's sections are labelled the same way. */
+.eyebrow {
+    font-size: 10.5px;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    display: flex;
+    align-items: baseline;
+    gap: 9px;
+    flex-wrap: wrap;
+}
+.eyebrow .sub { opacity: 0.8; }
+
+/* View switch (Ladder / Big screen) */
+.view-switch { display: flex; border: 1px solid var(--border-color); border-radius: 6px; overflow: hidden; }
+.view-switch button {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-family: inherit;
+    font-size: 12px;
+    padding: 5px 11px;
+    cursor: pointer;
+}
+.view-switch button[aria-pressed="true"] { background-color: var(--card-color-hover); color: var(--text-color); }
+.view-switch button:focus-visible { outline: 2px solid var(--accent-color); outline-offset: -2px; }
 
 /* Shared buttons */
 .btn { border: none; border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer; }

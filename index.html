@@ -7,93 +7,113 @@
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <link rel="stylesheet" href="/static/theme.css">
     <style>
-        /* Page-specific: the spectator card grid (roster.html uses a table instead) */
-        .player-list {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
-            gap: 14px;
-        }
-        .player-card {
-            background-color: var(--card-color);
-            border-radius: 10px;
-            padding: 14px 16px;
-            border-left: 4px solid var(--neutral-color);
-            transition: background-color 0.15s ease;
-        }
-        .player-card:hover { background-color: var(--card-color-hover); }
-        .player-card.faction-alliance-border { border-left-color: var(--alliance-color); }
-        .player-card.faction-horde-border { border-left-color: var(--horde-color); }
+        /* Two views over the same data:
+             Ladder    — dense ranked table, the default
+             Big screen — few big rows, readable across a room
+           Both are rendered from one filtered list; only one is in the DOM at
+           a time so morphdom never diffs against the other's markup. */
 
-        /* Top-3 podium, only shown when sorted by level — pulled out of the
-           regular grid entirely so it reads as a distinct tier at a glance,
-           not just a differently-colored card in the middle of the pack. */
-        .podium-section { margin-bottom: 26px; }
-        .podium-heading {
-            text-align: center;
-            font-size: 13px;
-            font-weight: 600;
+        .stat-strip {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 1px;
+            background-color: var(--border-color);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            overflow: hidden;
+            margin-bottom: 16px;
+        }
+        .stat {
+            background-color: var(--card-color);
+            padding: 9px 13px;
+        }
+        .stat .k { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); }
+        .stat .v { font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; }
+        .stat .v small { font-size: 11.5px; font-weight: 500; color: var(--text-muted); margin-left: 5px; }
+
+        /* ---------------- Ladder ---------------- */
+        .ladder-wrap { overflow-x: auto; border: 1px solid var(--border-color); border-radius: 8px; }
+        table.ladder { width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 760px; }
+        table.ladder th {
+            text-align: left;
+            font-weight: 500;
+            font-size: 10px;
+            letter-spacing: 0.09em;
             text-transform: uppercase;
-            letter-spacing: 0.08em;
-            color: var(--text-muted);
+            color: var(--text-dim);
+            padding: 8px;
+            background-color: var(--card-color);
+            border-bottom: 1px solid var(--border-color);
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
+        table.ladder td { padding: 8px; border-bottom: 1px solid #1e1e25; vertical-align: middle; }
+        table.ladder tbody tr:last-child td { border-bottom: none; }
+        table.ladder tbody tr:hover td { background-color: var(--card-color-hover); }
+        .rk { width: 34px; text-align: right; font-variant-numeric: tabular-nums; color: var(--text-dim); font-weight: 700; }
+        .rk.r1 { color: #ffd166; }
+        .rk.r2 { color: #c9ccd4; }
+        .rk.r3 { color: #cd7f32; }
+        .cname { font-weight: 600; white-space: nowrap; display: flex; align-items: center; gap: 7px; }
+        .csub { font-size: 10.5px; color: var(--text-dim); white-space: nowrap; }
+        .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .lvl { font-weight: 700; font-variant-numeric: tabular-nums; }
+        .pbar { height: 5px; background-color: #24242c; border-radius: 3px; overflow: hidden; min-width: 80px; }
+        .pbar i { display: block; height: 100%; background-color: var(--bar-color); border-radius: 3px; }
+        .ppct { font-size: 10.5px; color: var(--text-dim); margin-top: 3px; font-variant-numeric: tabular-nums; }
+        .zone { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
+        .col-progress { width: 20%; }
+        .idle-row td { opacity: 0.62; }
+
+        /* ---------------- Big screen ---------------- */
+        .hero {
+            display: flex;
+            align-items: center;
+            gap: 18px;
+            flex-wrap: wrap;
+            background: linear-gradient(90deg, rgba(243, 167, 60, 0.10), rgba(243, 167, 60, 0) 62%);
+            border: 1px solid rgba(243, 167, 60, 0.28);
+            border-radius: 8px;
+            padding: 16px 18px;
             margin-bottom: 14px;
         }
-        .podium-row {
+        .hero .crown { font-size: 11px; letter-spacing: 0.11em; text-transform: uppercase; color: var(--accent-color); }
+        .hero .who { font-size: 30px; font-weight: 800; line-height: 1.12; overflow-wrap: anywhere; }
+        .hero .meta { color: var(--text-muted); font-size: 13px; }
+        .hero .right { margin-left: auto; text-align: right; }
+        .hero .lvl-big { font-size: 44px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+        .hero .lvl-cap { font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-dim); }
+        .hero-xp { width: 100%; height: 9px; background-color: #24242c; border-radius: 5px; overflow: hidden; margin-top: 12px; }
+        .hero-xp i { display: block; height: 100%; background-color: var(--accent-color); border-radius: 5px; }
+
+        .big-row {
             display: flex;
-            justify-content: center;
-            align-items: flex-end;
-            gap: 16px;
+            align-items: center;
+            gap: 14px;
             flex-wrap: wrap;
-            margin-bottom: 22px;
-        }
-        .podium-divider { border: none; border-top: 1px solid var(--border-color); margin: 0 0 22px; }
-        .podium-card { width: 260px; flex-shrink: 0; }
-        .podium-card.rank-1 {
-            order: 2;
-            width: 290px;
-            padding-bottom: 22px;
-            box-shadow: 0 0 0 1px rgba(255, 215, 0, 0.7), 0 0 24px rgba(255, 215, 0, 0.18);
-        }
-        .podium-card.rank-1 .name { font-size: 19px; }
-        .podium-card.rank-2 { order: 1; box-shadow: 0 0 0 1px rgba(200, 205, 214, 0.6), 0 0 18px rgba(200, 205, 214, 0.12); }
-        .podium-card.rank-3 { order: 3; box-shadow: 0 0 0 1px rgba(205, 127, 50, 0.65), 0 0 18px rgba(205, 127, 50, 0.12); }
-
-        .card-top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
-        .rank { font-weight: bold; font-size: 13px; color: var(--text-muted); flex-shrink: 0; }
-        .name { font-weight: 700; font-size: 17px; overflow-wrap: anywhere; }
-        .level-badge {
-            margin-left: auto;
-            background-color: var(--accent-color);
-            color: #000;
-            font-weight: bold;
-            text-align: center;
-            padding: 3px 8px;
-            border-radius: 4px;
-            font-size: 13px;
-            flex-shrink: 0;
-        }
-
-        .meta-line {
-            font-size: 12.5px;
-            color: var(--text-muted);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 12px 16px;
             margin-bottom: 8px;
-            /* Was flex-wrap, which let a long guild/zone name wrap this to
-               two lines — on the podium specifically, that made whichever
-               flanking card had the longest guild name grow taller than
-               the (deliberately bigger) center card, since the row bottom-
-               aligns them. Single line + ellipsis keeps every card's
-               height predictable regardless of content length. */
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
+            background-color: var(--card-color);
         }
-        .meta-line .sep { opacity: 0.5; }
+        .big-row .rank { font-size: 17px; font-weight: 800; color: var(--text-dim); width: 28px; font-variant-numeric: tabular-nums; flex: none; }
+        .big-row .name { font-size: 19px; font-weight: 700; display: flex; align-items: center; gap: 8px; overflow-wrap: anywhere; }
+        .big-row .meta { font-size: 12px; color: var(--text-muted); }
+        .big-row .lvl { font-size: 24px; font-weight: 800; margin-left: auto; font-variant-numeric: tabular-nums; }
+        .big-row .barwrap { flex: 1 1 200px; min-width: 150px; }
+        .big-row .pct { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; margin-top: 4px; }
+        .big-bar { height: 7px; background-color: #24242c; border-radius: 4px; overflow: hidden; }
+        .big-bar i { display: block; height: 100%; background-color: var(--bar-color); border-radius: 4px; }
+        .big-row.idle-row { opacity: 0.62; }
 
-        .xp-container { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
-        .xp-bar-bg { background-color: var(--bg-color); border-radius: 4px; height: 10px; overflow: hidden; width: 100%; }
-        .xp-bar-fill { background-color: var(--bar-color); height: 100%; width: 0%; transition: width 0.4s ease; }
-        .xp-text { font-size: 11px; text-align: right; color: var(--text-muted); }
+        .empty-state { text-align: center; padding: 40px 10px; color: var(--text-muted); }
 
-        .tag-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+        @media (max-width: 560px) {
+            .hero .right { margin-left: 0; text-align: left; }
+            .big-row .lvl { margin-left: 0; }
+        }
     </style>
 </head>
 <body>
@@ -103,6 +123,10 @@
         <h1>4L Dashboard</h1>
         <div class="header-right">
             <span id="playerCount"></span>
+            <div class="view-switch" role="group" aria-label="Dashboard view">
+                <button type="button" id="viewLadder" aria-pressed="true">Ladder</button>
+                <button type="button" id="viewBig" aria-pressed="false">Big screen</button>
+            </div>
             <a class="nav-link" href="/analytics">Analytics</a>
             <a class="nav-link" href="/setup">Setup &amp; Downloads</a>
             <a class="nav-link" href="/roster">Manage Roster</a>
@@ -135,15 +159,35 @@
         </select>
     </div>
 
-    <div id="podiumSection" class="podium-section" hidden>
-        <div class="podium-heading">Top Performers</div>
-        <div id="podiumRow" class="podium-row"></div>
-        <hr class="podium-divider">
-    </div>
+    <div id="strip" class="stat-strip"></div>
 
-    <div id="playerList" class="player-list">
-        <!-- Rendered dynamically by JavaScript -->
-    </div>
+    <!-- Ladder (default) -->
+    <section id="ladderView">
+        <div class="eyebrow" style="margin-bottom:8px">Progression ladder <span class="sub" id="ladderSub"></span></div>
+        <div class="ladder-wrap">
+            <table class="ladder">
+                <thead>
+                    <tr>
+                        <th></th>
+                        <th>Character</th>
+                        <th>Faction</th>
+                        <th class="num">Lvl</th>
+                        <th class="col-progress">Progress</th>
+                        <th>Zone</th>
+                        <th class="num">Last sync</th>
+                    </tr>
+                </thead>
+                <tbody id="ladderBody"></tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- Big screen -->
+    <section id="bigView" hidden>
+        <div id="heroSlot"></div>
+        <div class="eyebrow" id="packLabel" style="margin:16px 0 10px" hidden>The pack</div>
+        <div id="bigRows"></div>
+    </section>
 </div>
 
 <script src="/static/vendor/morphdom-umd.min.js"></script>
@@ -164,73 +208,131 @@
         classFilterEl.appendChild(opt);
     });
 
-    // variant "podium" renders one of the top-3 cards (larger, gold/silver/
-    // bronze glow, no separate rank medal needed since the podium section
-    // itself is the "these are special" signal); otherwise a normal grid
-    // card. rank is the player's absolute rank (1-based) either way.
-    function buildCard(player, rank, variant) {
-        const factionClass = player.faction === "Alliance" ? "faction-alliance-border"
-            : player.faction === "Horde" ? "faction-horde-border" : "";
-        const factionTextClass = player.faction === "Alliance" ? "faction-alliance"
-            : player.faction === "Horde" ? "faction-horde" : "";
+    // Which layout is showing. Remembered per browser so the machine wired to
+    // the TV stays on Big screen and a laptop stays on Ladder.
+    let viewMode = "ladder";
+    try { viewMode = localStorage.getItem("dashboardView") || "ladder"; } catch (e) { /* private mode */ }
+
+    function setView(mode) {
+        viewMode = mode === "big" ? "big" : "ladder";
+        try { localStorage.setItem("dashboardView", viewMode); } catch (e) { /* ignore */ }
+        document.getElementById("ladderView").hidden = viewMode !== "ladder";
+        document.getElementById("bigView").hidden = viewMode !== "big";
+        document.getElementById("viewLadder").setAttribute("aria-pressed", String(viewMode === "ladder"));
+        document.getElementById("viewBig").setAttribute("aria-pressed", String(viewMode === "big"));
+        renderDashboard();
+    }
+    document.getElementById("viewLadder").addEventListener("click", () => setView("ladder"));
+    document.getElementById("viewBig").addEventListener("click", () => setView("big"));
+
+    // "2m ago" from the age the server sent, plus however long this tab has
+    // held it — the same arithmetic isStale() uses, shown to the reader.
+    function lastSyncLabel(player) {
+        if (player.idle_seconds == null) return "never";
+        const seconds = player.idle_seconds + (Date.now() - player._receivedAt) / 1000;
+        if (seconds < 60) return "just now";
+        if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+        if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+        return `${Math.floor(seconds / 86400)}d ago`;
+    }
+
+    function streamBadgeHtml(player) {
+        const href = safeUrl(player.stream_url);
+        if (!href) return "";
+        const platform = detectStreamPlatform(href);
+        const label = { twitch: "Twitch", youtube: "YouTube", kick: "Kick", other: "their stream" }[platform];
+        return `<a class="stream-badge" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer"
+                   title="Watch on ${label}">${STREAM_PLATFORM_ICONS[platform]}</a>`;
+    }
+
+    function tagChipsHtml(player) {
+        return (player.tags || [])
+            .map(t => `<span class="tag-chip" title="${escapeHtml(t)}">${escapeHtml(t)}</span>`)
+            .join("");
+    }
+
+    // Rank colour only means something when the list is ranked by level —
+    // alphabetical "#1" is just whoever starts with A.
+    function rankClass(rank, ranked) {
+        return ranked && rank <= 3 ? ` r${rank}` : "";
+    }
+
+    function buildLadderRow(player, rank, ranked) {
         const classColor = CLASS_COLORS[player.class] || "var(--text-color)";
-        const streamHref = safeUrl(player.stream_url);
-        const tags = player.tags || [];
-        const podiumClass = variant === "podium" ? `podium-card rank-${rank}` : "";
-
-        const metaParts = [];
-        const metaPlain = [];
-        if (player.faction) { metaParts.push(`<span class="${factionTextClass}">${escapeHtml(player.faction)}</span>`); metaPlain.push(player.faction); }
-        if (player.class) { metaParts.push(`<span style="color:${classColor}">${escapeHtml(player.class)}</span>`); metaPlain.push(player.class); }
-        if (player.guild) { metaParts.push(escapeHtml(player.guild)); metaPlain.push(player.guild); }
-        if (player.current_zone) { metaParts.push(`<span title="Current zone">📍 ${escapeHtml(player.current_zone)}</span>`); metaPlain.push(player.current_zone); }
-        const metaLine = metaParts.length
-            ? metaParts.join(' <span class="sep">·</span> ')
-            : '<span class="sep">No profile data yet</span>';
-        // The line itself can now truncate (see .meta-line CSS) — the title
-        // attribute keeps the full text one hover away instead of just gone.
-        const metaTitle = escapeHtml(metaPlain.join(" · "));
-
-        // Just a channel link — no live/offline claim, since we have no way
-        // to check that without polling the platform's API.
-        const streamPlatform = streamHref ? detectStreamPlatform(streamHref) : null;
-        const streamLabel = { twitch: "Twitch", youtube: "YouTube", kick: "Kick", other: "their stream" }[streamPlatform];
-        const streamBadge = streamHref
-            ? `<a class="stream-badge" href="${escapeHtml(streamHref)}" target="_blank" rel="noopener noreferrer" title="Watch on ${streamLabel}">
-                 ${STREAM_PLATFORM_ICONS[streamPlatform]}
-               </a>`
-            : "";
-
-        const tagChips = tags.map(t => `<span class="tag-chip" title="${escapeHtml(t)}">${escapeHtml(t)}</span>`).join("");
-        const safeName = escapeHtml(player.name);
-        const cardId = playerElementId("card", player.name);
-
+        const factionClass = player.faction === "Alliance" ? "faction-alliance"
+            : player.faction === "Horde" ? "faction-horde" : "";
+        // Angle brackets are the guild convention in WoW, so they're entities
+        // rather than literal < >, which the browser would treat as a tag.
+        const sub = [
+            player.class ? escapeHtml(player.class) : "",
+            player.guild ? `&lt;${escapeHtml(player.guild)}&gt;` : "",
+        ].filter(Boolean).join(" · ");
+        const tags = tagChipsHtml(player);
         return `
-            <div id="${cardId}" class="player-card ${factionClass} ${podiumClass}">
-                <div class="card-top">
-                    <span class="rank">#${rank}</span>
-                    <span class="name" style="color:${classColor}">${safeName}</span>
-                    ${streamBadge}
-                    <span class="level-badge">Lvl ${player.level}</span>
+            <tr id="${playerElementId("row", player.name)}" class="${isStale(player) ? "idle-row" : ""}">
+                <td class="rk${rankClass(rank, ranked)}">${rank}</td>
+                <td>
+                    <div class="cname" style="color:${classColor}">${escapeHtml(player.name)}${streamBadgeHtml(player)}</div>
+                    <div class="csub">${sub || "No profile yet"}</div>
+                    ${tags ? `<div class="tag-row" style="margin-top:4px">${tags}</div>` : ""}
+                </td>
+                <td class="${factionClass}">${escapeHtml(player.faction || "—")}</td>
+                <td class="num lvl">${player.level}</td>
+                <td>
+                    <div class="pbar"><i style="width:${player.pct}%"></i></div>
+                    <div class="ppct">${player.pct}% · ${player.current_xp.toLocaleString()} / ${player.max_xp.toLocaleString()}</div>
+                </td>
+                <td class="zone" title="${escapeHtml(player.current_zone || "")}">${escapeHtml(player.current_zone || "—")}</td>
+                <td class="num csub">${lastSyncLabel(player)}</td>
+            </tr>`;
+    }
+
+    function buildHero(player) {
+        const classColor = CLASS_COLORS[player.class] || "var(--text-color)";
+        const factionClass = player.faction === "Alliance" ? "faction-alliance"
+            : player.faction === "Horde" ? "faction-horde" : "";
+        const meta = [
+            player.class ? escapeHtml(player.class) : "",
+            player.faction ? `<span class="${factionClass}">${escapeHtml(player.faction)}</span>` : "",
+            player.guild ? escapeHtml(player.guild) : "",
+            player.current_zone ? escapeHtml(player.current_zone) : "",
+        ].filter(Boolean).join(" · ");
+        return `
+            <div class="hero" id="${playerElementId("hero", player.name)}">
+                <div>
+                    <div class="crown">★ Leader</div>
+                    <div class="who" style="color:${classColor}">${escapeHtml(player.name)}${streamBadgeHtml(player)}</div>
+                    <div class="meta">${meta || "No profile data yet"}</div>
                 </div>
-                <div class="meta-line" title="${metaTitle}">${metaLine}</div>
-                <div class="xp-container">
-                    <div class="xp-bar-bg">
-                        <div class="xp-bar-fill" style="width: ${player.pct}%"></div>
-                    </div>
-                    <div class="xp-text">${player.current_xp.toLocaleString()} / ${player.max_xp.toLocaleString()} (${player.pct}%)</div>
+                <div class="right">
+                    <div class="lvl-big">${player.level}</div>
+                    <div class="lvl-cap">Level · ${player.pct}% through</div>
                 </div>
-                ${tagChips ? `<div class="tag-row">${tagChips}</div>` : ""}
-            </div>
-        `;
+                <div class="hero-xp"><i style="width:${player.pct}%"></i></div>
+            </div>`;
+    }
+
+    function buildBigRow(player, rank) {
+        const classColor = CLASS_COLORS[player.class] || "var(--text-color)";
+        const meta = [player.class, player.current_zone].filter(Boolean).map(escapeHtml).join(" · ");
+        return `
+            <div class="big-row ${isStale(player) ? "idle-row" : ""}" id="${playerElementId("big", player.name)}">
+                <span class="rank">${rank}</span>
+                <div>
+                    <div class="name" style="color:${classColor}">${escapeHtml(player.name)}${streamBadgeHtml(player)}</div>
+                    <div class="meta">${meta || "No profile yet"}</div>
+                </div>
+                <div class="barwrap">
+                    <div class="big-bar"><i style="width:${player.pct}%"></i></div>
+                    <div class="pct">${player.pct}% of level ${player.level}</div>
+                </div>
+                <span class="lvl">${player.level}</span>
+            </div>`;
     }
 
     // Guilds are arbitrary free text, not a fixed set like classes, so this
     // rebuilds the option list from whoever's actually present rather than
-    // hardcoding it. Options are based on all validly-profiled players
-    // (ignoring the OTHER active filters), so switching faction/class
-    // filters doesn't make guild options disappear out from under you.
-    // Preserves the current selection if it's still a valid option, so
+    // hardcoding it. Preserves the current selection if it's still valid, so
     // picking a guild doesn't get silently undone by the next re-render.
     function updateGuildOptions(players) {
         const select = document.getElementById("guildFilter");
@@ -238,23 +340,33 @@
         const guilds = [...new Set(players.map(p => p.guild).filter(Boolean))].sort((a, b) => a.localeCompare(b));
         select.innerHTML = '<option value="">All Guilds</option>' +
             guilds.map(g => `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`).join("");
-        if (guilds.includes(currentValue)) {
-            select.value = currentValue;
-        }
+        if (guilds.includes(currentValue)) select.value = currentValue;
     }
 
-    // Process Filters and Render UI
+    function renderStrip(players, allPlayers) {
+        const activeCount = allPlayers.filter(p => !isStale(p)).length;
+        const leader = [...players].sort((a, b) => b.level - a.level || b.pct - a.pct)[0];
+        const tiles = [
+            ["Leader", leader ? leader.level : "—", leader ? escapeHtml(leader.name) : "nobody yet"],
+            ["Characters", allPlayers.length, "tracked"],
+            ["Active now", activeCount, `of ${allPlayers.length}`],
+            ["Showing", players.length, "after filters"],
+        ];
+        document.getElementById("strip").innerHTML = tiles.map(([k, v, sub]) => `
+            <div class="stat">
+                <div class="k">${k}</div>
+                <div class="v">${v}<small>${sub}</small></div>
+            </div>`).join("");
+    }
+
     function renderDashboard() {
-        const container = document.getElementById("playerList");
         const searchQuery = document.getElementById("searchBar").value.toLowerCase();
         const sortBy = document.getElementById("sortBy").value;
         const factionFilter = document.getElementById("factionFilter").value;
         const classFilter = document.getElementById("classFilter").value;
 
-        let players = Object.keys(playerData).map(name => ({
-            name: name,
-            ...playerData[name]
-        }));
+        const allPlayers = Object.keys(playerData).map(name => ({ name, ...playerData[name] }));
+        let players = allPlayers;
 
         // Parked characters (a bank alt someone logged into and left) are
         // hidden by default once they've gone STALE_AFTER_MINUTES without any
@@ -271,58 +383,57 @@
         updateGuildOptions(players);
         const guildFilter = document.getElementById("guildFilter").value;
 
-        if (searchQuery) {
-            players = players.filter(p => p.name.toLowerCase().includes(searchQuery));
-        }
-        if (guildFilter) {
-            players = players.filter(p => p.guild === guildFilter);
-        }
-        if (factionFilter) {
-            players = players.filter(p => p.faction === factionFilter);
-        }
-        if (classFilter) {
-            players = players.filter(p => p.class === classFilter);
-        }
+        if (searchQuery) players = players.filter(p => p.name.toLowerCase().includes(searchQuery));
+        if (guildFilter) players = players.filter(p => p.guild === guildFilter);
+        if (factionFilter) players = players.filter(p => p.faction === factionFilter);
+        if (classFilter) players = players.filter(p => p.class === classFilter);
 
-        if (sortBy === "level") {
+        const ranked = sortBy === "level";
+        if (ranked) {
             players.sort((a, b) => b.level - a.level || b.pct - a.pct);
-        } else if (sortBy === "name") {
+        } else {
             players.sort((a, b) => a.name.localeCompare(b.name));
         }
 
         document.getElementById("playerCount").textContent =
             players.length ? `${players.length} player${players.length === 1 ? "" : "s"}` : "";
+        renderStrip(players, allPlayers);
 
-        if (players.length === 0) {
-            document.getElementById("podiumSection").hidden = true;
-            const emptyMessage = idleCount && activityFilter.value !== "all"
-                ? `No active characters right now — ${idleCount} idle hidden. Choose "Show all" to see them.`
-                : "No characters leveling yet...";
-            container.innerHTML = `<div style="grid-column: 1 / -1; text-align:center; padding:40px; color:#666;">${emptyMessage}</div>`;
+        const emptyMessage = idleCount && activityFilter.value !== "all"
+            ? `No active characters right now — ${idleCount} idle hidden. Choose "Show all" to see them.`
+            : "No characters leveling yet...";
+
+        if (viewMode === "ladder") {
+            document.getElementById("ladderSub").textContent =
+                ranked ? "Live · sorted by level" : "Live · sorted by name";
+            const body = document.getElementById("ladderBody");
+            if (!players.length) {
+                body.innerHTML = `<tr><td colspan="7" class="empty-state">${emptyMessage}</td></tr>`;
+                return;
+            }
+            morphChildren(body, players.map((p, i) => buildLadderRow(p, i + 1, ranked)).join(""));
             return;
         }
 
-        // Podium only makes sense when ranked by level — alphabetical
-        // "rank #1" isn't a leader, it's just "starts with A." Whoever's
-        // top 3 within the current filters/search gets featured; the grid
-        // below just continues the ranking from #4.
-        const podiumSection = document.getElementById("podiumSection");
-        const showPodium = sortBy === "level";
-        podiumSection.hidden = !showPodium;
-
-        const podiumPlayers = showPodium ? players.slice(0, 3) : [];
-        const gridPlayers = showPodium ? players.slice(3) : players;
-        const gridStartRank = showPodium ? 4 : 1;
-
-        if (showPodium) {
-            const podiumHtml = podiumPlayers.map((player, i) => buildCard(player, i + 1, "podium")).join("");
-            morphChildren(document.getElementById("podiumRow"), podiumHtml);
+        // Big screen: the leader is featured only when the list is actually
+        // ranked, for the same reason rank colours are.
+        const heroSlot = document.getElementById("heroSlot");
+        const rowsHost = document.getElementById("bigRows");
+        const packLabel = document.getElementById("packLabel");
+        if (!players.length) {
+            heroSlot.innerHTML = "";
+            packLabel.hidden = true;
+            rowsHost.innerHTML = `<div class="empty-state">${emptyMessage}</div>`;
+            return;
         }
-
-        const gridHtml = gridPlayers.map((player, i) => buildCard(player, gridStartRank + i, "grid")).join("");
-        morphChildren(container, gridHtml);
+        const featured = ranked ? players[0] : null;
+        const rest = ranked ? players.slice(1) : players;
+        morphChildren(heroSlot, featured ? buildHero(featured) : "");
+        packLabel.hidden = !featured || !rest.length;
+        morphChildren(rowsHost, rest.map((p, i) => buildBigRow(p, ranked ? i + 2 : i + 1)).join(""));
     }
 
+    setView(viewMode);
     connectWebSocket(renderDashboard);
 
     // Staleness is a function of time, not of messages — without this a
