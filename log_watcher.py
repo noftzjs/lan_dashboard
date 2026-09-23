@@ -64,7 +64,7 @@ def load_config():
         "ingestion_token": None,
     }
     if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
             config.update(json.load(f))
 
     parser = argparse.ArgumentParser(description="Tail WoW chat log and forward LAN dashboard events.")
@@ -99,7 +99,7 @@ def load_config():
 
 def load_state():
     if os.path.exists(STATE_PATH):
-        with open(STATE_PATH, "r", encoding="utf-8") as f:
+        with open(STATE_PATH, encoding="utf-8") as f:
             return json.load(f)
     return {}
 
@@ -182,7 +182,11 @@ def follow(log_path, poll_interval, state):
             continue
 
         if file_handle is None:
-            file_handle = open(log_path, "r", encoding="utf-8", errors="replace")
+            # Deliberately not a context manager: this handle has to stay open
+            # across the yields below (that's what "following" a file means) and
+            # is closed here only when the log rotates. A `with` block would
+            # close it on the first yield.
+            file_handle = open(log_path, encoding="utf-8", errors="replace")  # noqa: SIM115
             size = os.path.getsize(log_path)
             # Resume where we left off unless the file is smaller than that
             # (new session / rotated file) in which case start from the top.

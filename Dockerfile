@@ -9,7 +9,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py index.html roster.html setup.html ./
+COPY main.py index.html roster.html setup.html analytics.html ./
 COPY static/ ./static/
 # Served by the /setup page: the addon zip is built from LanDashboard/ on each
 # request, so the addon ships with the code.

@@ -1,23 +1,23 @@
-import asyncio
+import contextlib
 import hashlib
 import io
 import json
 import logging
 import os
 import secrets
-import sqlite3
 import time
 import zipfile
-from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
+from typing import Any
+
+import aiosqlite
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-import aiosqlite
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("lan_dashboard")
@@ -75,7 +75,7 @@ def require_roster_auth(credentials: HTTPBasicCredentials = Depends(roster_auth)
 INGESTION_TOKEN = os.environ.get("INGESTION_TOKEN")
 
 
-def require_ingestion_token(x_ingestion_token: Optional[str] = Header(None)):
+def require_ingestion_token(x_ingestion_token: str | None = Header(None)):
     if not INGESTION_TOKEN:
         return  # not configured — LAN-open mode, unchanged from before
     if not safe_equals(x_ingestion_token or "", INGESTION_TOKEN):
@@ -100,9 +100,9 @@ DB_FILE = os.environ.get("DB_FILE", "lan_progression.db")
 # sync), so a player who's actively playing but hasn't synced recently also
 # looks stale; raise this if that hides people who are really playing.
 STALE_AFTER_SECONDS = float(os.environ.get("STALE_AFTER_MINUTES", "60")) * 60
-player_states: Dict[str, Dict[str, Any]] = {}
+player_states: dict[str, dict[str, Any]] = {}
 
-def idle_seconds(state: Dict[str, Any]) -> Optional[float]:
+def idle_seconds(state: dict[str, Any]) -> float | None:
     """Seconds since this character's last accepted event, or None if the
     server has never seen one (treated as stale by the client)."""
     last = state.get("last_activity")
@@ -110,7 +110,7 @@ def idle_seconds(state: Dict[str, Any]) -> Optional[float]:
         return None
     return max(0.0, (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds())
 
-def public_state(state: Dict[str, Any]) -> Dict[str, Any]:
+def public_state(state: dict[str, Any]) -> dict[str, Any]:
     # The client can't compare last_activity to its own clock (server and
     # browser can be in different timezones or drift), so ship an age the
     # client only has to add its own elapsed-since-receipt time to.
@@ -132,9 +132,17 @@ async def startup_event():
                 current_xp INTEGER,
                 max_xp INTEGER,
                 quest_id INTEGER,
-                xp_reward INTEGER
+                xp_reward INTEGER,
+                event_time TEXT
             )
         """)
+        # event_time is when the event happened in game (addon v2.11.0+); the
+        # older `timestamp` column is when the watcher delivered the batch, which
+        # collapses a whole session onto a few sync instants. Rows written before
+        # this existed keep event_time NULL — chart over it with that in mind.
+        cursor = await db.execute("PRAGMA table_info(xp_history)")
+        if "event_time" not in {row[1] for row in await cursor.fetchall()}:
+            await db.execute("ALTER TABLE xp_history ADD COLUMN event_time TEXT")
         # Table to preserve state if the server restarts mid-LAN
         await db.execute("""
             CREATE TABLE IF NOT EXISTS player_snapshots (
@@ -211,7 +219,7 @@ async def reload_states_from_db():
 # --- WEBSOCKET CONNECTION MANAGER ---
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: List[WebSocket] = []
+        self.active_connections: list[WebSocket] = []
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -222,10 +230,11 @@ class ConnectionManager:
 
     async def broadcast(self, message: dict):
         for connection in self.active_connections:
-            try:
+            # A spectator whose tab just closed shouldn't stop the broadcast
+            # reaching everyone else; the socket is dropped from the list by
+            # disconnect() when its own endpoint coroutine notices.
+            with contextlib.suppress(Exception):
                 await connection.send_json(message)
-            except Exception:
-                pass
 
 manager = ConnectionManager()
 
@@ -235,8 +244,8 @@ class LogPayload(BaseModel):
 
 class RosterMetaPayload(BaseModel):
     # Fields left as None are unchanged; send "" / [] explicitly to clear one.
-    stream_url: Optional[str] = None
-    tags: Optional[List[str]] = None
+    stream_url: str | None = None
+    tags: list[str] | None = None
 
 # Mirrored in static/dashboard.js for immediate UI feedback, but this is the
 # boundary that actually matters: the API is callable directly regardless of
@@ -271,6 +280,28 @@ def default_state():
     }
 
 
+# Addon v2.11.0+ stamps each event with the realm clock, inserted straight after
+# the log type. Older addons don't, and at a LAN not everyone updates at once, so
+# the field is sniffed rather than assumed: only a bare 10-digit integer in that
+# slot is a timestamp. Nothing else can look like one — faction is a word, level
+# is 1-60, a quest id is at most 5 digits, and a zone name isn't all digits — and
+# the range check keeps a stray number from being read as a date.
+EVENT_TIME_MIN = 1_577_836_800  # 2020-01-01, comfortably before this project existed
+EVENT_TIME_MAX = 4_102_444_800  # 2100-01-01
+
+
+def extract_event_time_field(rest: str) -> datetime | None:
+    """The in-game time this event happened, or None for a pre-v2.11.0 addon."""
+    candidate, _, _ = rest.partition(",")
+    candidate = candidate.strip()
+    if len(candidate) != 10 or not candidate.isdigit():
+        return None
+    epoch = int(candidate)
+    if not (EVENT_TIME_MIN <= epoch <= EVENT_TIME_MAX):
+        return None
+    return datetime.fromtimestamp(epoch, timezone.utc)
+
+
 @app.post("/api/log-update")
 async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_ingestion_token)):
     try:
@@ -286,6 +317,10 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
             raise ValueError(f"Malformed payload, missing name/type: {payload.data!r}")
         if len(player_name) > PLAYER_NAME_MAX_LENGTH:
             raise ValueError(f"Player name too long ({len(player_name)} chars): {player_name!r}")
+
+        event_time = extract_event_time_field(rest)
+        if event_time is not None:
+            _, _, rest = rest.partition(",")
 
         async with aiosqlite.connect(DB_FILE) as db:
             if log_type == "ZONE":
@@ -323,9 +358,11 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                 state["class"] = class_token
                 state["guild"] = guild
                 await db.execute("""
-                    INSERT INTO player_snapshots (player, level, current_xp, max_xp, pct, last_updated, faction, class, guild)
+                    INSERT INTO player_snapshots
+                        (player, level, current_xp, max_xp, pct, last_updated, faction, class, guild)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(player) DO UPDATE SET faction=excluded.faction, class=excluded.class, guild=excluded.guild
+                    ON CONFLICT(player) DO UPDATE SET
+                        faction=excluded.faction, class=excluded.class, guild=excluded.guild
                 """, (player_name, state["level"], state["current_xp"], state["max_xp"], state["pct"],
                       state["last_updated"], faction, class_token, guild))
 
@@ -354,14 +391,17 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                     INSERT INTO player_snapshots (player, level, current_xp, max_xp, pct, last_updated)
                     VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(player) DO UPDATE SET
-                        level=excluded.level, current_xp=excluded.current_xp, max_xp=excluded.max_xp, pct=excluded.pct, last_updated=excluded.last_updated
+                        level=excluded.level, current_xp=excluded.current_xp,
+                        max_xp=excluded.max_xp, pct=excluded.pct,
+                        last_updated=excluded.last_updated
                 """, (player_name, level, current_xp, max_xp, pct, last_updated))
 
                 # Append to granular historical timeline
                 await db.execute("""
-                    INSERT INTO xp_history (timestamp, player, log_type, level, current_xp, max_xp)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (payload.timestamp, player_name, log_type, level, current_xp, max_xp))
+                    INSERT INTO xp_history (timestamp, player, log_type, level, current_xp, max_xp, event_time)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (payload.timestamp, player_name, log_type, level, current_xp, max_xp,
+                      event_time.isoformat() if event_time else None))
 
             elif log_type == "QUEST":
                 quest_id_str, xp_reward_str = (p.strip() for p in rest.split(",", 1))
@@ -371,9 +411,10 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                 if not (0 <= xp_reward <= XP_SANITY_CEILING):
                     raise ValueError(f"xp_reward {xp_reward} outside sane range")
                 await db.execute("""
-                    INSERT INTO xp_history (timestamp, player, log_type, quest_id, xp_reward)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (payload.timestamp, player_name, log_type, quest_id, xp_reward))
+                    INSERT INTO xp_history (timestamp, player, log_type, quest_id, xp_reward, event_time)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (payload.timestamp, player_name, log_type, quest_id, xp_reward,
+                      event_time.isoformat() if event_time else None))
 
             else:
                 raise ValueError(f"Unknown log_type {log_type!r} in payload: {payload.data!r}")
@@ -473,7 +514,7 @@ ADDON_DIR = os.path.join(PROJECT_DIR, "LanDashboard")
 DOWNLOADS_DIR = os.path.join(PROJECT_DIR, "downloads")
 WATCHER_EXE = os.path.join(DOWNLOADS_DIR, "savedvars_watcher.exe")
 ADDON_FILE_EXTENSIONS = (".lua", ".toc", ".xml")
-_watcher_hash_cache: Dict[str, Any] = {}
+_watcher_hash_cache: dict[str, Any] = {}
 
 # Optional passphrase that gates the watcher download. When set, the bare .exe
 # is no longer served; instead POST /api/watcher-bundle returns a zip holding
@@ -494,7 +535,7 @@ PUBLIC_URL = os.environ.get("PUBLIC_URL")
 # briefly block friends too, which beats an unbounded guessing rate.
 PASSPHRASE_MAX_FAILURES = 10
 PASSPHRASE_WINDOW_SECONDS = 60
-_passphrase_failures: List[float] = []
+_passphrase_failures: list[float] = []
 
 
 def passphrase_locked_out() -> bool:
@@ -511,7 +552,7 @@ def public_base_url(request: Request) -> str:
     return f"{scheme}://{host}"
 
 
-def addon_version() -> Optional[str]:
+def addon_version() -> str | None:
     try:
         with open(os.path.join(ADDON_DIR, "LanDashboard.toc"), encoding="utf-8") as f:
             for line in f:
@@ -522,7 +563,7 @@ def addon_version() -> Optional[str]:
     return None
 
 
-def watcher_info() -> Optional[Dict[str, Any]]:
+def watcher_info() -> dict[str, Any] | None:
     """Size, SHA-256 and build time of the hosted .exe, or None if it isn't
     there. The hash is what lets a player (or Windows SmartScreen-wary
     friend) verify the download; cached by mtime/size so it isn't recomputed
@@ -640,10 +681,159 @@ def download_watcher_bundle(payload: BundleRequest, request: Request):
     )
 
 
+@app.get("/analytics")
+async def get_analytics_page():
+    """Progression analytics over the stored history."""
+    return FileResponse(os.path.join(PROJECT_DIR, "analytics.html"))
+
+
+# Quest reward bands. Boundaries are round numbers a player recognises rather
+# than computed quantiles, so the buckets mean the same thing run to run.
+QUEST_BANDS = [(0, 250), (250, 500), (500, 1000), (1000, 2000), (2000, XP_SANITY_CEILING)]
+
+
+def summarise_xp_rows(rows):
+    """Total XP observed per player, walking each character's XP events in
+    order. Two cases carry XP: progress within a level, and a level-up, where
+    the character finished the old level (max_xp - last seen) and then earned
+    whatever it has in the new one. Only ever adds forward progress, so a
+    reset or a re-read can't produce a negative total."""
+    gained: dict[str, int] = {}
+    previous: dict[str, dict] = {}
+    for row in rows:
+        player = row["player"]
+        last = previous.get(player)
+        if last is not None:
+            if row["level"] == last["level"] and row["current_xp"] > last["current_xp"]:
+                gained[player] = gained.get(player, 0) + (row["current_xp"] - last["current_xp"])
+            elif row["level"] > last["level"]:
+                finished = max(0, (last["max_xp"] or 0) - last["current_xp"])
+                gained[player] = gained.get(player, 0) + finished + row["current_xp"]
+        previous[player] = {"level": row["level"], "current_xp": row["current_xp"], "max_xp": row["max_xp"]}
+    return gained
+
+
+@app.get("/api/analytics")
+async def get_analytics():
+    """Aggregates for the analytics page. Computed per request by reading the
+    history table — fine at LAN scale (tens of thousands of rows at most); if
+    this ever gets slow, cache it per DB write rather than sampling."""
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT player, level, current_xp, max_xp FROM xp_history WHERE log_type='XP' ORDER BY id"
+        ) as cursor:
+            xp_rows = await cursor.fetchall()
+        async with db.execute(
+            "SELECT player, xp_reward FROM xp_history WHERE log_type='QUEST' AND xp_reward IS NOT NULL"
+        ) as cursor:
+            quest_rows = await cursor.fetchall()
+        # The XP each level costs is a game constant, so any player who has
+        # been through a level tells us its price.
+        async with db.execute(
+            "SELECT level, MAX(max_xp) AS cost FROM xp_history"
+            " WHERE log_type='XP' AND max_xp > 1 GROUP BY level ORDER BY level"
+        ) as cursor:
+            level_rows = await cursor.fetchall()
+        async with db.execute(
+            "SELECT player, level, event_time FROM xp_history"
+            " WHERE log_type='XP' AND event_time IS NOT NULL ORDER BY event_time"
+        ) as cursor:
+            timed_rows = await cursor.fetchall()
+        async with db.execute("SELECT COUNT(*) AS n FROM xp_history") as cursor:
+            history_total = (await cursor.fetchone())["n"]
+
+    gained = summarise_xp_rows(xp_rows)
+
+    # Levels gained *while this dashboard was watching* — a character first
+    # seen at 10 and now 17 gained 7 here, not 16. Counting level-1 would
+    # credit us with levels earned before anyone installed the addon.
+    seen_levels: dict[str, list] = {}
+    for row in xp_rows:
+        low, high = seen_levels.get(row["player"], (row["level"], row["level"]))
+        seen_levels[row["player"]] = (min(low, row["level"]), max(high, row["level"]))
+    levels_gained = sum(high - low for low, high in seen_levels.values())
+
+    quest_count: dict[str, int] = {}
+    quest_xp: dict[str, int] = {}
+    for row in quest_rows:
+        quest_count[row["player"]] = quest_count.get(row["player"], 0) + 1
+        quest_xp[row["player"]] = quest_xp.get(row["player"], 0) + row["xp_reward"]
+
+    players = []
+    for name, state in player_states.items():
+        total = gained.get(name, 0)
+        quests_xp = quest_xp.get(name, 0)
+        players.append({
+            "name": name,
+            "class": state.get("class"),
+            "faction": state.get("faction"),
+            "guild": state.get("guild"),
+            "level": state.get("level", 1),
+            "pct": state.get("pct", 0),
+            "zone": state.get("current_zone"),
+            "idle_seconds": idle_seconds(state),
+            "quests": quest_count.get(name, 0),
+            "quest_xp": quests_xp,
+            # Quest XP is reported by the game, while the total is inferred from
+            # XP snapshots, so a character whose quest turn-ins arrived but
+            # whose XP ticks didn't could otherwise show negative "other".
+            "other_xp": max(0, total - quests_xp),
+            "total_xp": total,
+        })
+    players.sort(key=lambda p: (p["level"], p["pct"]), reverse=True)
+
+    all_rewards = [row["xp_reward"] for row in quest_rows]
+    banded_total = sum(all_rewards)
+    quest_bands = []
+    for low, high in QUEST_BANDS:
+        in_band = [value for value in all_rewards if low <= value < high]
+        quest_bands.append({
+            "low": low,
+            "high": high,
+            "count": len(in_band),
+            "xp": sum(in_band),
+            "share": round(100 * sum(in_band) / banded_total, 1) if banded_total else 0,
+        })
+
+    # One line per character, but only for players with at least two separate
+    # moments recorded — a single point is not a trend.
+    velocity: dict[str, list] = {}
+    for row in timed_rows:
+        velocity.setdefault(row["player"], []).append({"at": row["event_time"], "level": row["level"]})
+    velocity = {
+        name: points for name, points in velocity.items()
+        if len({point["at"] for point in points}) >= 2
+    }
+
+    return {
+        "totals": {
+            "characters": len(players),
+            "levels_gained": levels_gained,
+            "quests": len(all_rewards),
+            "quest_xp": banded_total,
+            "xp_recorded": sum(gained.values()),
+        },
+        "players": players,
+        "quest_bands": quest_bands,
+        "level_costs": [{"level": row["level"], "xp": row["cost"]} for row in level_rows],
+        "velocity": velocity,
+        "history": {"rows": history_total, "timed_rows": len(timed_rows)},
+        "stale_after_seconds": STALE_AFTER_SECONDS,
+    }
+
+
 @app.get("/api/leaderboard")
 async def get_leaderboard(sort_by: str = Query("level"), search: str = Query(None)):
-    players = [{"name": name, **public_state(stats)} for name, stats in player_states.items() if not search or search.lower() in name.lower()]
-    players.sort(key=lambda x: (x["level"], x["pct"]) if sort_by == "level" else x["name"].lower(), reverse=(sort_by == "level"))
+    players = [
+        {"name": name, **public_state(stats)}
+        for name, stats in player_states.items()
+        if not search or search.lower() in name.lower()
+    ]
+    players.sort(
+        key=lambda x: (x["level"], x["pct"]) if sort_by == "level" else x["name"].lower(),
+        reverse=(sort_by == "level"),
+    )
     return players
 
 @app.websocket("/ws/dashboard")

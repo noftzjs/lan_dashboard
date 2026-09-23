@@ -26,10 +26,9 @@ local currentZone = ""
 -- EVENT QUEUE (SavedVariables)
 -- WoWChatLog.txt only flushes to disk on a full client exit — not /reload,
 -- not logout to character select (confirmed empirically). SavedVariables
--- DOES flush on /reload, so the real event data lives here now, not just
--- in the chat frame. print() below is kept purely for the player's own
--- visual confirmation that things are firing — the watcher (once built)
--- will read this table, not the chat log, for PROFILE/ZONE/XP/QUEST data.
+-- DOES flush on /reload, so the real event data lives here now. The watcher
+-- reads this table, not the chat log, for PROFILE/ZONE/XP/QUEST data — so
+-- nothing here needs to reach the chat frame at all (see LDB_VERBOSE).
 --
 -- Never cleared by the addon itself — it has no way to know what a watcher
 -- has already read. nextId only ever grows; a watcher tracks the highest
@@ -46,8 +45,38 @@ LanDashboardDB = LanDashboardDB or { events = {}, nextId = 1 }
 -- register again).
 LanDashboardDB.known = LanDashboardDB.known or {}
 
-local function emit(line)
-    print("[DASHBOARD] " .. line)
+-- Debug echo, off by default: every queued event printed to chat. This used
+-- to be how the data actually left the game (the watcher read the chat log),
+-- so it had to print — but SavedVariables carries the data now and the echo
+-- is just noise: PLAYER_XP_UPDATE alone fires on every mob kill and quest
+-- reward, which floods the chat frame during normal play. Turn it back on
+-- with /ldb verbose when diagnosing what the addon is or isn't recording.
+LDB_VERBOSE = LDB_VERBOSE or false
+
+-- The realm's clock, not the player's PC clock: every player's events then sit
+-- on one shared timeline even if their machines disagree, which is what makes
+-- cross-player charts ("who levelled faster") meaningful. time() is a local
+-- fallback in case a client ever lacks GetServerTime.
+local function eventTime()
+    if GetServerTime then
+        return GetServerTime()
+    end
+    return time()
+end
+
+-- Events carry the moment they HAPPENED, stamped here as they're queued.
+-- Without this the only timestamp is the one the watcher adds when it POSTs a
+-- batch, which is delivery time, not play time: a whole evening of events
+-- collapses onto the handful of instants the player happened to sync at, and
+-- every time-based chart becomes meaningless. The stamp goes immediately after
+-- the log type, where the field is always a bare number — the trailing fields
+-- (zone, guild) are free text that can contain commas, so appending there
+-- would be ambiguous.
+local function emit(playerName, logType, payload)
+    local line = string.format("%s,%s,%d,%s", playerName, logType, eventTime(), payload)
+    if LDB_VERBOSE then
+        print("[DASHBOARD] " .. line)
+    end
     LanDashboardDB.events[LanDashboardDB.nextId] = line
     LanDashboardDB.nextId = LanDashboardDB.nextId + 1
 end
@@ -158,7 +187,7 @@ local function sendProfile(playerName)
     local guildName = GetGuildInfo("player") or ""
 
     -- guildName is last since it's the only field that can contain commas
-    emit(string.format("%s,PROFILE,%s,%s,%s", playerName, faction, classToken, guildName))
+    emit(playerName, "PROFILE", string.format("%s,%s,%s", faction, classToken, guildName))
 end
 
 LanFrame:SetScript("OnEvent", function(self, event, ...)
@@ -177,7 +206,7 @@ LanFrame:SetScript("OnEvent", function(self, event, ...)
 
             -- Also check the zone right away upon loading into the game
             currentZone = GetZoneText() or "Unknown"
-            emit(string.format("%s,ZONE,%s", playerName, currentZone))
+            emit(playerName, "ZONE", currentZone)
 
             -- The PROFILE/ZONE just queued only exist in memory until
             -- SavedVariables is written, and nothing else would prompt for
@@ -219,7 +248,7 @@ LanFrame:SetScript("OnEvent", function(self, event, ...)
         local newZone = GetZoneText() or "Unknown"
         if newZone ~= currentZone and newZone ~= "" then
             currentZone = newZone
-            emit(string.format("%s,ZONE,%s", playerName, currentZone))
+            emit(playerName, "ZONE", currentZone)
         end
 
     -- 3. CORE XP & LEVEL LOGGING HANDLERS
@@ -230,18 +259,18 @@ LanFrame:SetScript("OnEvent", function(self, event, ...)
 
         if currentXP == 0 and currentLevel == 1 then return end
 
-        emit(string.format("%s,XP,%d,%d,%d", playerName, currentLevel, currentXP, maxXP))
+        emit(playerName, "XP", string.format("%d,%d,%d", currentLevel, currentXP, maxXP))
 
     elseif event == "QUEST_TURNED_IN" then
         local questID, xpReward = ...
-        emit(string.format("%s,QUEST,%d,%d", playerName, questID, xpReward or 0))
+        emit(playerName, "QUEST", string.format("%d,%d", questID, xpReward or 0))
         addScore(LDB_WEIGHT_QUEST, "quest")
         print(string.format("|cffe8a33d[LAN Dashboard] Score: %d|r", LDB_score))
 
     elseif event == "PLAYER_LEVEL_UP" then
         local newLevel = ...
         local maxXP = UnitXPMax("player")
-        emit(string.format("%s,XP,%d,0,%d", playerName, newLevel, maxXP))
+        emit(playerName, "XP", string.format("%d,0,%d", newLevel, maxXP))
         addScore(LDB_WEIGHT_LEVEL, "level up")
 
     -- 4. RELOAD-TRIGGER SAFE WINDOWS (kill-based scoring removed — see the
@@ -263,16 +292,21 @@ SlashCmdList["LANDASHBOARD"] = function(msg)
         print("|cffe8a33d[LAN Dashboard] Sync button shown — click it (top of screen) to test.|r")
         return
     end
+    if msg == "verbose" then
+        LDB_VERBOSE = not LDB_VERBOSE
+        print(string.format("|cffe8a33d[LAN Dashboard] Event echo %s.|r", LDB_VERBOSE and "ON — every recorded event will print here" or "off"))
+        return
+    end
     if msg == "forget" then
         LanDashboardDB.known = {}
         print("|cffe8a33d[LAN Dashboard] Forgot all known characters — the next login of each will prompt to sync again.|r")
         return
     end
     print(string.format(
-        "|cffe8a33d[LAN Dashboard] score=%d  flush=%d  escalate=%d  queued=%d  |  weights: quest=%d level=%d  |  auto-sync on login: %s|r",
+        "|cffe8a33d[LAN Dashboard] score=%d  flush=%d  escalate=%d  queued=%d  |  weights: quest=%d level=%d  |  auto-sync on login: %s  |  echo: %s|r",
         LDB_score, LDB_FLUSH_THRESHOLD, LDB_ESCALATE_THRESHOLD, LanDashboardDB.nextId - 1,
-        LDB_WEIGHT_QUEST, LDB_WEIGHT_LEVEL, tostring(LDB_AUTO_SYNC_ON_LOGIN)
+        LDB_WEIGHT_QUEST, LDB_WEIGHT_LEVEL, tostring(LDB_AUTO_SYNC_ON_LOGIN), tostring(LDB_VERBOSE)
     ))
 end
 
-print("|cffcd7f32LAN Dashboard v2.9.1 Initialized! Type /ldb to check reload-trigger status, /ldb sync to test the sync button.|r")
+print("|cffcd7f32LAN Dashboard v2.11.0 Initialized! Type /ldb to check reload-trigger status, /ldb sync to test the sync button.|r")

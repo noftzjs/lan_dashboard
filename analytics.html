@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>4L Analytics</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="stylesheet" href="/static/theme.css">
+    <style>
+        /* Page-specific: chart panels. Series colours are validated against
+           the #1e1e24 panel surface for colour-vision separation — class
+           colours are NOT used as chart marks (several pairs are
+           indistinguishable); they ride as identity chips beside names. */
+        :root {
+            --s1: #3987e5;   /* quest XP        */
+            --s2: #d95926;   /* everything else */
+            --s3: #199e70;   /* third series    */
+            --grid: #2c2c33;
+        }
+        .panel {
+            background-color: var(--card-color);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 18px 20px;
+            margin-bottom: 16px;
+        }
+        .panel h2 { font-size: 15px; margin: 0 0 2px; }
+        .panel .answers { color: var(--text-muted); font-size: 13px; margin: 0 0 16px; }
+
+        .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+        .kpi { background-color: var(--card-color-hover); border: 1px solid var(--border-color); border-radius: 8px; padding: 14px 16px; }
+        .kpi .label { font-size: 12px; color: var(--text-muted); }
+        .kpi .value { font-size: 28px; font-weight: 600; line-height: 1.15; margin-top: 2px; }
+        .kpi .sub { font-size: 12px; color: var(--text-muted); }
+
+        .row { margin-bottom: 14px; }
+        .row-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 13px; margin-bottom: 5px; }
+        .who { display: flex; align-items: center; gap: 7px; min-width: 0; }
+        .chip { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+        .who .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .amount { color: var(--text-muted); font-variant-numeric: tabular-nums; flex: none; }
+        .stack { display: flex; gap: 2px; height: 20px; }
+        .seg { height: 100%; position: relative; }
+        .seg:first-child { border-radius: 3px 0 0 3px; }
+        .seg:last-child { border-radius: 0 4px 4px 0; }
+        .seg.quest { background-color: var(--s1); }
+        .seg.other { background-color: var(--s2); }
+        .seg-label { position: absolute; inset: 0; display: flex; align-items: center; padding-left: 8px; font-size: 11.5px; color: #061323; font-weight: 600; white-space: nowrap; }
+
+        .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12.5px; color: var(--text-muted); margin: 14px 0 0; }
+        .legend .key { display: flex; align-items: center; gap: 6px; }
+        .legend .sw { width: 11px; height: 11px; border-radius: 2px; }
+
+        .chart-scroll { overflow-x: auto; }
+        svg { display: block; max-width: 100%; height: auto; }
+        .axis-text { fill: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+        .lbl { fill: var(--text-color); font-size: 11.5px; }
+        .grid-line { stroke: var(--grid); stroke-width: 1; }
+
+        /* Tables are the one thing allowed to be wider than the panel; they
+           scroll inside their own box so the page itself never does. */
+        .table-scroll { overflow-x: auto; }
+        table.data { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 460px; }
+        table.data th, table.data td { text-align: left; padding: 7px 10px 7px 0; border-bottom: 1px solid var(--border-color); }
+        table.data th { color: var(--text-muted); font-weight: 500; font-size: 12px; cursor: default; }
+        table.data td.num, table.data th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+        .empty { color: var(--text-muted); font-size: 13px; padding: 18px 0; }
+        .empty b { color: var(--accent-color); }
+        details { border-top: 1px solid var(--border-color); margin-top: 14px; padding-top: 10px; }
+        summary { cursor: pointer; font-size: 12.5px; color: var(--text-muted); }
+        summary:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2px; }
+        .footnote { color: var(--text-muted); font-size: 12px; margin: 10px 0 0; }
+        .analytics { max-width: 980px; margin: 0 auto; }
+        @media (max-width: 520px) {
+            .row-head { flex-direction: column; align-items: flex-start; gap: 2px; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="container analytics">
+    <header>
+        <h1>4L Analytics</h1>
+        <div class="header-right">
+            <span id="scope"></span>
+            <a class="nav-link" href="/">Back to Dashboard</a>
+            <a class="nav-link" href="/setup">Setup</a>
+            <div id="status" class="disconnected">Loading...</div>
+        </div>
+    </header>
+
+    <div class="panel">
+        <h2>At a glance</h2>
+        <p class="answers">Everything recorded since this dashboard started collecting.</p>
+        <div class="kpis" id="kpis"></div>
+    </div>
+
+    <div class="panel">
+        <h2>Quest XP vs everything else</h2>
+        <p class="answers">Who is questing and who is grinding. Bar length is total XP, so characters are comparable; the split within each bar is that character's own mix.</p>
+        <div id="composition"></div>
+        <p class="legend">
+            <span class="key"><span class="sw" style="background-color:var(--s1)"></span>XP from quest turn-ins</span>
+            <span class="key"><span class="sw" style="background-color:var(--s2)"></span>Everything else (kills, exploration)</span>
+        </p>
+        <details>
+            <summary>Table view</summary>
+            <div class="table-scroll"><table class="data" id="compositionTable"></table></div>
+        </details>
+    </div>
+
+    <div class="panel">
+        <h2>Where the quest XP comes from</h2>
+        <p class="answers">Share of all quest XP by the size of the reward.</p>
+        <div class="chart-scroll" id="bands"></div>
+    </div>
+
+    <div class="panel">
+        <h2>The hill ahead</h2>
+        <p class="answers">What each level costs, with the leading character's position marked.</p>
+        <div class="chart-scroll" id="levelCosts"></div>
+    </div>
+
+    <div class="panel">
+        <h2>Race to 60</h2>
+        <p class="answers">Level over time, using the in-game clock.</p>
+        <div id="velocity"></div>
+    </div>
+
+    <div class="panel">
+        <h2>Roster</h2>
+        <p class="answers">Every character the dashboard knows about.</p>
+        <div class="table-scroll"><table class="data" id="roster"></table></div>
+    </div>
+</div>
+
+<script src="/static/dashboard.js"></script>
+<script>
+    const fmt = (n) => (n ?? 0).toLocaleString();
+
+    function classChip(cls) {
+        const colour = CLASS_COLORS[cls] || "var(--text-muted)";
+        return `<span class="chip" style="background-color:${colour}"></span>`;
+    }
+
+    function renderKpis(d) {
+        const t = d.totals;
+        const timed = d.history.timed_rows;
+        const tiles = [
+            ["Characters tracked", fmt(t.characters), `${d.players.filter(p => p.level > 1).length} past level 1`],
+            ["Levels gained", fmt(t.levels_gained), "across everyone"],
+            ["Quests turned in", fmt(t.quests), `${fmt(t.quest_xp)} XP rewarded`],
+            ["XP recorded", fmt(t.xp_recorded), timed ? `${fmt(timed)} events timed` : "no timed events yet"],
+        ];
+        document.getElementById("kpis").innerHTML = tiles.map(([label, value, sub]) => `
+            <div class="kpi">
+                <div class="label">${escapeHtml(label)}</div>
+                <div class="value">${escapeHtml(value)}</div>
+                <div class="sub">${escapeHtml(sub)}</div>
+            </div>`).join("");
+    }
+
+    function renderComposition(players) {
+        const withXp = players.filter(p => p.total_xp > 0);
+        const host = document.getElementById("composition");
+        if (!withXp.length) {
+            host.innerHTML = `<p class="empty">No XP recorded yet. This fills in as soon as someone plays and syncs.</p>`;
+            document.getElementById("compositionTable").innerHTML = "";
+            return;
+        }
+        const max = Math.max(...withXp.map(p => p.total_xp));
+        host.innerHTML = withXp.map(p => {
+            const questPct = p.total_xp ? (p.quest_xp / p.total_xp) * 100 : 0;
+            const barPct = (p.total_xp / max) * 100;
+            // The label only fits when the segment is a big enough slice of a
+            // bar that is itself wide enough — a character with a fraction of
+            // the leader's XP has a sliver of a bar, and text would spill out
+            // of it. The value is still in the tooltip and the table view.
+            const roomForLabel = questPct >= 18 && (barPct * questPct) / 100 >= 12;
+            const label = roomForLabel ? `${Math.round(questPct)}% quests` : "";
+            const title = `${p.name} — quests ${fmt(p.quest_xp)} XP (${Math.round(questPct)}%), other ${fmt(p.other_xp)} XP`;
+            return `
+            <div class="row">
+                <div class="row-head">
+                    <span class="who">${classChip(p.class)}<span class="nm">${escapeHtml(p.name)}</span></span>
+                    <span class="amount">${fmt(p.total_xp)} XP</span>
+                </div>
+                <div class="stack" style="width:${Math.max(barPct, 1.5)}%" title="${escapeHtml(title)}">
+                    <div class="seg quest" style="flex:0 0 ${questPct}%"><span class="seg-label">${label}</span></div>
+                    <div class="seg other" style="flex:0 0 ${100 - questPct}%"></div>
+                </div>
+            </div>`;
+        }).join("");
+
+        document.getElementById("compositionTable").innerHTML = `
+            <thead><tr><th>Character</th><th class="num">Quest XP</th><th class="num">Other XP</th><th class="num">Quest share</th></tr></thead>
+            <tbody>${withXp.map(p => `
+                <tr>
+                    <td>${escapeHtml(p.name)}</td>
+                    <td class="num">${fmt(p.quest_xp)}</td>
+                    <td class="num">${fmt(p.other_xp)}</td>
+                    <td class="num">${p.total_xp ? Math.round((p.quest_xp / p.total_xp) * 100) : 0}%</td>
+                </tr>`).join("")}</tbody>`;
+    }
+
+    function renderBands(bands) {
+        const host = document.getElementById("bands");
+        const total = bands.reduce((sum, b) => sum + b.count, 0);
+        if (!total) {
+            host.innerHTML = `<p class="empty">No quest turn-ins recorded yet.</p>`;
+            return;
+        }
+        const ordered = [...bands].reverse();      // biggest rewards on top
+        const maxShare = Math.max(...ordered.map(b => b.share), 1);
+        const rowH = 38, plotX = 150, plotW = 400;
+        const height = ordered.length * rowH + 34;
+        const topShare = Math.max(...ordered.map(b => b.share));
+
+        const bars = ordered.map((b, i) => {
+            const y = i * rowH + 12;
+            const w = Math.max(2, (b.share / maxShare) * plotW);
+            const isTop = b.share === topShare && b.share > 0;
+            const name = b.high >= 1000000 ? `${fmt(b.low)}+ XP` : `${fmt(b.low)}–${fmt(b.high)} XP`;
+            return `
+                <text class="lbl" x="0" y="${y + 13}">${escapeHtml(name)}</text>
+                <text class="axis-text" x="${plotX - 10}" y="${y + 13}" text-anchor="end">${b.count} quest${b.count === 1 ? "" : "s"}</text>
+                <rect x="${plotX}" y="${y}" width="${w}" height="18" rx="4" fill="${isTop ? "var(--accent-color)" : "var(--s1)"}">
+                    <title>${escapeHtml(name)} — ${b.count} quests, ${fmt(b.xp)} XP (${b.share}%)</title>
+                </rect>
+                <text class="axis-text" x="${plotX + w + 8}" y="${y + 13}" ${isTop ? 'fill="var(--accent-color)"' : ""}>${b.share}%</text>`;
+        }).join("");
+
+        host.innerHTML = `
+            <svg viewBox="0 0 640 ${height}" role="img" aria-label="Share of quest XP by reward size">
+                <line class="grid-line" x1="${plotX}" y1="6" x2="${plotX}" y2="${ordered.length * rowH + 6}"/>
+                ${bars}
+            </svg>`;
+    }
+
+    function renderLevelCosts(costs, players) {
+        const host = document.getElementById("levelCosts");
+        if (!costs.length) {
+            host.innerHTML = `<p class="empty">No level data yet.</p>`;
+            return;
+        }
+        const leader = players.length ? players[0] : null;
+        const max = Math.max(...costs.map(c => c.xp));
+        const baseY = 176, plotTop = 20, plotH = baseY - plotTop;
+        const slot = Math.min(72, Math.floor(580 / costs.length));
+        const barW = Math.min(24, Math.max(8, slot - 20));
+        const width = Math.max(320, costs.length * slot + 60);
+
+        const bars = costs.map((c, i) => {
+            const h = Math.max(2, (c.xp / max) * plotH);
+            const x = 56 + i * slot;
+            const y = baseY - h;
+            const isLeader = leader && c.level === leader.level;
+            if (isLeader) {
+                const fillH = Math.max(2, h * (leader.pct / 100));
+                return `
+                    <rect x="${x}" y="${y}" width="${barW}" height="${h}" rx="4" fill="#2a2a33"/>
+                    <rect x="${x}" y="${baseY - fillH}" width="${barW}" height="${fillH}" rx="4" fill="var(--accent-color)">
+                        <title>Level ${c.level}: ${fmt(c.xp)} XP to clear — ${escapeHtml(leader.name)} is ${leader.pct}% through</title>
+                    </rect>
+                    <text class="axis-text" x="${x + barW / 2}" y="${y - 6}" text-anchor="middle" fill="var(--accent-color)">${Math.round(leader.pct)}%</text>
+                    <text class="axis-text" x="${x + barW / 2}" y="196" text-anchor="middle" fill="var(--accent-color)">${c.level}</text>`;
+            }
+            return `
+                <rect x="${x}" y="${y}" width="${barW}" height="${h}" rx="4" fill="var(--s1)">
+                    <title>Level ${c.level}: ${fmt(c.xp)} XP to clear</title>
+                </rect>
+                <text class="axis-text" x="${x + barW / 2}" y="196" text-anchor="middle">${c.level}</text>`;
+        }).join("");
+
+        const ticks = [0, 0.25, 0.5, 0.75, 1].map(f => {
+            const y = baseY - f * plotH;
+            const value = Math.round((max * f) / 1000);
+            return `<line class="grid-line" x1="42" y1="${y}" x2="${width - 14}" y2="${y}"/>
+                    <text class="axis-text" x="36" y="${y + 4}" text-anchor="end">${f === 0 ? "0" : value + "k"}</text>`;
+        }).join("");
+
+        host.innerHTML = `
+            <svg viewBox="0 0 ${width} 214" role="img" aria-label="XP required for each level reached so far">
+                ${ticks}${bars}
+                <text class="axis-text" x="42" y="212">Level &rarr;</text>
+            </svg>`;
+    }
+
+    function renderVelocity(velocity, history) {
+        const host = document.getElementById("velocity");
+        const names = Object.keys(velocity);
+        if (!names.length) {
+            const why = history.timed_rows
+                ? "Not enough timed events yet — a line needs at least two separate moments."
+                : "No events carry an in-game time yet.";
+            host.innerHTML = `<p class="empty">${why} <b>This chart fills in as people play on addon v2.11.0 or newer</b>, which stamps every event with the game's clock. Events recorded before that upgrade can't appear here.</p>`;
+            return;
+        }
+        const series = names.map(n => velocity[n].map(p => ({ t: Date.parse(p.at), level: p.level })))
+                            .map(pts => pts.sort((a, b) => a.t - b.t));
+        const allT = series.flat().map(p => p.t);
+        const allL = series.flat().map(p => p.level);
+        const minT = Math.min(...allT), maxT = Math.max(...allT);
+        const minL = Math.min(...allL), maxL = Math.max(...allL);
+        const spanT = Math.max(1, maxT - minT), spanL = Math.max(1, maxL - minL);
+        const L = 46, R = 560, T = 20, B = 190;
+        const x = (t) => L + ((t - minT) / spanT) * (R - L);
+        const y = (lv) => B - ((lv - minL) / spanL) * (B - T);
+        const colours = ["var(--s1)", "var(--s2)", "var(--s3)"];
+
+        const lines = series.map((pts, i) => {
+            const colour = colours[i % colours.length];
+            const d = pts.map(p => `${x(p.t)},${y(p.level)}`).join(" ");
+            const last = pts[pts.length - 1];
+            return `<polyline fill="none" stroke="${colour}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="${d}"/>
+                    <circle cx="${x(last.t)}" cy="${y(last.level)}" r="4.5" fill="${colour}" stroke="var(--card-color)" stroke-width="2"/>`;
+        }).join("");
+
+        const hours = Math.round((maxT - minT) / 3600000);
+        host.innerHTML = `
+            <div class="chart-scroll">
+            <svg viewBox="0 0 640 214" role="img" aria-label="Level over time per character">
+                <line class="grid-line" x1="${L}" y1="${B}" x2="${R + 40}" y2="${B}"/>
+                <line class="grid-line" x1="${L}" y1="${T}" x2="${R + 40}" y2="${T}"/>
+                <text class="axis-text" x="${L - 8}" y="${B + 4}" text-anchor="end">${minL}</text>
+                <text class="axis-text" x="${L - 8}" y="${T + 4}" text-anchor="end">${maxL}</text>
+                ${lines}
+                <text class="axis-text" x="${L}" y="210">${new Date(minT).toLocaleString()}</text>
+                <text class="axis-text" x="${R + 40}" y="210" text-anchor="end">${hours >= 1 ? hours + "h later" : "under an hour"}</text>
+            </svg></div>
+            <p class="legend">${names.map((n, i) => `
+                <span class="key"><span class="sw" style="background-color:${colours[i % colours.length]}"></span>${escapeHtml(n)}</span>`).join("")}</p>`;
+    }
+
+    function renderRoster(players, staleAfter) {
+        document.getElementById("roster").innerHTML = `
+            <thead><tr>
+                <th>Character</th><th>Class</th><th>Faction</th>
+                <th class="num">Level</th><th class="num">Progress</th>
+                <th class="num">Quests</th><th>Zone</th><th>Status</th>
+            </tr></thead>
+            <tbody>${players.map(p => {
+                const idle = p.idle_seconds === null || p.idle_seconds > staleAfter;
+                return `<tr>
+                    <td><span class="who">${classChip(p.class)}<span class="nm">${escapeHtml(p.name)}</span></span></td>
+                    <td>${escapeHtml(p.class || "—")}</td>
+                    <td class="${p.faction === "Alliance" ? "faction-alliance" : p.faction === "Horde" ? "faction-horde" : ""}">${escapeHtml(p.faction || "—")}</td>
+                    <td class="num">${p.level}</td>
+                    <td class="num">${p.pct}%</td>
+                    <td class="num">${fmt(p.quests)}</td>
+                    <td>${escapeHtml(p.zone || "—")}</td>
+                    <td>${idle ? "Idle" : "Active"}</td>
+                </tr>`;
+            }).join("")}</tbody>`;
+    }
+
+    async function load() {
+        const statusEl = document.getElementById("status");
+        try {
+            const response = await fetch(`${API_BASE}/api/analytics`);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const data = await response.json();
+            renderKpis(data);
+            renderComposition(data.players);
+            renderBands(data.quest_bands);
+            renderLevelCosts(data.level_costs, data.players);
+            renderVelocity(data.velocity, data.history);
+            renderRoster(data.players, data.stale_after_seconds);
+            document.getElementById("scope").textContent =
+                `${data.history.rows.toLocaleString()} events recorded`;
+            statusEl.textContent = "Up to date";
+            statusEl.className = "connected";
+        } catch (e) {
+            statusEl.textContent = "Couldn't load";
+            statusEl.className = "disconnected";
+            document.getElementById("kpis").innerHTML =
+                `<p class="empty">Couldn't reach the server. Refresh to try again.</p>`;
+        }
+    }
+
+    load();
+    // History only changes when someone syncs, so a slow refresh is plenty.
+    setInterval(load, 60000);
+</script>
+</body>
+</html>

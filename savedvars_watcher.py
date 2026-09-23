@@ -18,7 +18,9 @@ file on every poll, rather than tailing it, and tracks how many of the
 events in it have already been forwarded.
 
 Usage:
-    python savedvars_watcher.py --savedvars-path "C:\\...\\WTF\\Account\\YOURACCOUNT\\SavedVariables\\LanDashboard.lua" --server-url "http://<server-ip>:5000/api/log-update"
+    python savedvars_watcher.py
+        --savedvars-path "C:\\...\\WTF\\Account\\YOURACCOUNT\\SavedVariables\\LanDashboard.lua"
+        --server-url "http://<server-ip>:5000/api/log-update"
 
 Settings can also be stored in savedvars_watcher_config.json next to this
 script so players don't need to pass flags every LAN:
@@ -44,6 +46,7 @@ Two ways to run:
     save creates the file. Needs the extra packages in requirements-watcher.txt.
 """
 import argparse
+import contextlib
 import glob
 import json
 import os
@@ -179,11 +182,13 @@ class ConfigError(Exception):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Forward LanDashboard SavedVariables events to the dashboard server.")
-    parser.add_argument("--savedvars-path", help="Path to the addon's SavedVariables file (.../SavedVariables/LanDashboard.lua)")
+    parser.add_argument("--savedvars-path",
+                        help="Path to the addon's SavedVariables file (.../SavedVariables/LanDashboard.lua)")
     parser.add_argument("--server-url", help="Dashboard ingestion endpoint URL")
     parser.add_argument("--poll-interval", type=float, help="Seconds between checks for new events")
     parser.add_argument("--ingestion-token", help="Shared token, if the server has INGESTION_TOKEN set")
-    parser.add_argument("--tray", action="store_true", help="Run in the system tray instead of this console (always on for the packaged .exe)")
+    parser.add_argument("--tray", action="store_true",
+                        help="Run in the system tray instead of this console (always on for the packaged .exe)")
     parser.add_argument("--run-seconds", type=float, help=argparse.SUPPRESS)  # test hook: quit cleanly after N seconds
     return parser.parse_args()
 
@@ -203,12 +208,15 @@ def load_config(args, interactive):
     }
     if os.path.exists(CONFIG_PATH):
         try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            with open(CONFIG_PATH, encoding="utf-8") as f:
                 config.update(json.load(f))
         except (OSError, ValueError) as e:
             # A hand-edited config with a stray comma shouldn't surface as a
             # raw traceback (or, in tray mode, as nothing at all).
-            raise ConfigError(f"Couldn't read {CONFIG_PATH}:\n{e}\n\nFix or delete that file and start the watcher again.") from e
+            raise ConfigError(
+                f"Couldn't read {CONFIG_PATH}:\n{e}\n\n"
+                "Fix or delete that file and start the watcher again."
+            ) from e
 
     if args.savedvars_path:
         config["savedvars_path"] = args.savedvars_path
@@ -253,7 +261,8 @@ def load_config(args, interactive):
         if not config["savedvars_path"]:
             raise ConfigError(
                 "No SavedVariables path configured. Pass --savedvars-path, or create "
-                'savedvars_watcher_config.json with {"savedvars_path": "C:\\\\...\\\\WTF\\\\Account\\\\YOURACCOUNT\\\\SavedVariables\\\\LanDashboard.lua"}.\n'
+                'savedvars_watcher_config.json with {"savedvars_path": '
+                '"C:\\\\...\\\\WTF\\\\Account\\\\YOURACCOUNT\\\\SavedVariables\\\\LanDashboard.lua"}.\n'
                 "Find yours under your WoW install folder — the exact subfolder name depends on\n"
                 "which version/client you're running, e.g.:\n"
                 r"  <WoW Install>\_classic_era_\WTF\Account\<ACCOUNT NAME>\SavedVariables\LanDashboard.lua" "\n"
@@ -268,7 +277,7 @@ def load_config(args, interactive):
 
 def load_state():
     if os.path.exists(STATE_PATH):
-        with open(STATE_PATH, "r", encoding="utf-8") as f:
+        with open(STATE_PATH, encoding="utf-8") as f:
             return json.load(f)
     return {"sent_count": 0}
 
@@ -403,7 +412,8 @@ def watch(config, stop_event):
                     file_was_missing = False
             if not path:
                 if not announced_waiting:
-                    say("No addon save file found yet. It appears after the addon saves once (log in, click Sync or type /reload). Waiting...")
+                    say("No addon save file found yet. It appears after the addon saves once "
+                        "(log in, click Sync or type /reload). Waiting...")
                     announced_waiting = True
                 set_status("Waiting for the addon's first save", "wait")
                 stop_event.wait(poll)
@@ -421,7 +431,7 @@ def watch(config, stop_event):
             file_was_missing = False
 
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
+            with open(path, encoding="utf-8", errors="replace") as f:
                 text = f.read()
         except OSError as e:
             log_error(f"Could not read SavedVariables file: {e}")
@@ -434,7 +444,8 @@ def watch(config, stop_event):
         # sent, the addon's queue was reset (e.g. SavedVariables wiped
         # for testing) — start over rather than sending nothing forever.
         if len(events) < state["sent_count"]:
-            log_error(f"Event count went backwards ({len(events)} < {state['sent_count']}) — assuming the queue was reset.")
+            log_error(f"Event count went backwards ({len(events)} < {state['sent_count']}) "
+                      "— assuming the queue was reset.")
             state["sent_count"] = 0
             backed_up_count = 0
 
@@ -490,7 +501,8 @@ def watch(config, stop_event):
                 break
             except requests.exceptions.RequestException as e:
                 if not server_down:
-                    log_error(f"Could not reach the server ({type(e).__name__}) — will retry remaining events next poll.")
+                    log_error(f"Could not reach the server ({type(e).__name__}) "
+                              "— will retry remaining events next poll.")
                     notify("Can't reach the dashboard. Will keep retrying.")
                     server_down = True
                 set_status("Can't reach the server — retrying", "wait")
@@ -562,7 +574,7 @@ class TrayUI:
         self.level = "wait"
         self.images = {level: self._draw_icon(level) for level in ("ok", "wait", "error")}
         menu = pystray.Menu(
-            pystray.MenuItem(lambda item: self.status_text, None, enabled=False),
+            pystray.MenuItem(lambda _item: self.status_text, None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Open dashboard", self._open_dashboard, default=True),
             pystray.MenuItem("Open log file", self._open_log),
@@ -598,23 +610,21 @@ class TrayUI:
             pass  # cosmetic; never let it take the watcher down
 
     def notify(self, message):
-        try:
+        with contextlib.suppress(Exception):
             self.icon.notify(message, "LAN Dashboard Watcher")
-        except Exception:
-            pass
 
-    def _open_dashboard(self, icon=None, item=None):
+    def _open_dashboard(self, *_pystray_args):
         webbrowser.open(self.dashboard_url)
 
-    def _open_log(self, icon=None, item=None):
+    def _open_log(self, *_pystray_args):
         if not os.path.exists(LOG_PATH):
             _append(LOG_PATH, "")
         os.startfile(LOG_PATH)
 
-    def _open_folder(self, icon=None, item=None):
+    def _open_folder(self, *_pystray_args):
         os.startfile(SCRIPT_DIR)
 
-    def _quit(self, icon=None, item=None):
+    def _quit(self, *_pystray_args):
         self.stop_event.set()
         self.icon.stop()
 
@@ -646,7 +656,8 @@ def run_tray(config, args):
     try:
         TRAY = TrayUI(dashboard_url, stop_event)
     except ImportError as e:
-        show_message(f"The tray libraries are missing ({e}). Install them with: pip install -r requirements-watcher.txt", error=True)
+        show_message(f"The tray libraries are missing ({e}). "
+                     "Install them with: pip install -r requirements-watcher.txt", error=True)
         return
     say("Started in the system tray.")
     TRAY.run(lambda: watch(config, stop_event), run_seconds=args.run_seconds)
@@ -669,12 +680,14 @@ def main():
         try:
             config = load_config(args, interactive=True)
         except ConfigError as e:
-            raise SystemExit(str(e))
+            raise SystemExit(str(e)) from e
         run_console(config)
         return
 
     if not acquire_single_instance():
-        show_message("LAN Dashboard Watcher is already running.\n\nLook for its icon in the system tray (bottom-right of the taskbar — it may be under the ^ arrow).")
+        show_message("LAN Dashboard Watcher is already running.\n\n"
+                     "Look for its icon in the system tray (bottom-right of the taskbar "
+                     "— it may be under the ^ arrow).")
         return
     try:
         config = load_config(args, interactive=False)
@@ -683,7 +696,8 @@ def main():
         show_message(str(e), error=True)
     except Exception:
         log_error("Fatal error:\n" + traceback.format_exc())
-        show_message("The watcher hit an unexpected error and had to close. Details are in savedvars_watcher.log next to the program.", error=True)
+        show_message("The watcher hit an unexpected error and had to close. "
+                     "Details are in savedvars_watcher.log next to the program.", error=True)
 
 
 if __name__ == "__main__":

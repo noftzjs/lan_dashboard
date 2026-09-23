@@ -1,0 +1,44 @@
+# Lint config, so the CLI and the editor agree on what counts as a warning.
+# Run:  python -m ruff check .        (add --fix for the mechanical ones)
+
+line-length = 120
+target-version = "py310"   # the local venv; the Docker image is 3.11
+
+[lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes (real bugs: unused/undefined names)
+    "I",         # import sorting
+    "UP",        # pyupgrade — keep syntax current for target-version
+    "B",         # bugbear
+    "SIM",       # simplifications
+    "C4",        # comprehensions
+    "RET",       # return-statement hygiene
+    "ARG",       # unused arguments
+    "BLE",       # blind excepts
+    "DTZ",       # naive datetimes
+]
+
+ignore = [
+    # FastAPI's dependency-injection idiom IS a call in an argument default
+    # (`_auth: None = Depends(...)`). It's how the framework is meant to be
+    # used, and the alternative bugbear suggests would break the injection.
+    "B008",
+
+    # Naive datetimes are deliberate in the places that remain: they are
+    # operator-facing local wall-clock stamps (watcher log lines, the backup
+    # CSV, `last_updated`) where the reader is sitting at that machine and a
+    # UTC offset would only add noise. Everything that has to be comparable
+    # ACROSS machines is already timezone-aware on purpose — `event_time`
+    # (the addon's realm clock) and `last_activity` (which drives the stale
+    # filter) both use datetime.now(timezone.utc).
+    "DTZ005",
+]
+
+[lint.per-file-ignores]
+# The tray watcher deliberately swallows exceptions in its UI and logging
+# paths: a cosmetic failure (a tooltip that won't update, a log line that
+# can't be written) must never take down a watcher that is otherwise
+# delivering data, and with no console there is nowhere for a traceback to
+# go. Each site logs or degrades visibly instead.
+"savedvars_watcher.py" = ["BLE001"]
