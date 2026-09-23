@@ -133,7 +133,9 @@ async def startup_event():
                 max_xp INTEGER,
                 quest_id INTEGER,
                 xp_reward INTEGER,
-                event_time TEXT
+                event_time TEXT,
+                gold INTEGER,
+                played_total INTEGER
             )
         """)
         # event_time is when the event happened in game (addon v2.11.0+); the
@@ -141,8 +143,14 @@ async def startup_event():
         # collapses a whole session onto a few sync instants. Rows written before
         # this existed keep event_time NULL — chart over it with that in mind.
         cursor = await db.execute("PRAGMA table_info(xp_history)")
-        if "event_time" not in {row[1] for row in await cursor.fetchall()}:
+        history_columns = {row[1] for row in await cursor.fetchall()}
+        if "event_time" not in history_columns:
             await db.execute("ALTER TABLE xp_history ADD COLUMN event_time TEXT")
+        # Stored per STATUS row so gold and playtime can be charted over a
+        # LAN rather than only read as a current value.
+        for column in ("gold", "played_total"):
+            if column not in history_columns:
+                await db.execute(f"ALTER TABLE xp_history ADD COLUMN {column} INTEGER")
         # Table to preserve state if the server restarts mid-LAN
         await db.execute("""
             CREATE TABLE IF NOT EXISTS player_snapshots (
@@ -156,7 +164,10 @@ async def startup_event():
                 faction TEXT,
                 guild TEXT,
                 class TEXT,
-                last_activity TEXT
+                last_activity TEXT,
+                gold INTEGER,
+                played_total INTEGER,
+                played_level INTEGER
             )
         """)
         # Migrate older databases created before these columns were tracked.
@@ -165,6 +176,11 @@ async def startup_event():
         for column in ("current_zone", "faction", "guild", "class", "last_activity"):
             if column not in existing_columns:
                 await db.execute(f"ALTER TABLE player_snapshots ADD COLUMN {column} TEXT")
+        # Gold (copper) and time played (seconds) from the addon's STATUS
+        # snapshot -- integers, unlike the text columns above.
+        for column in ("gold", "played_total", "played_level"):
+            if column not in existing_columns:
+                await db.execute(f"ALTER TABLE player_snapshots ADD COLUMN {column} INTEGER")
 
         # One-time cleanup: older addon/mock-generator versions stored the
         # literal string "No Guild" for guildless characters, indistinguishable
@@ -228,6 +244,9 @@ async def reload_states_from_db():
                     "guild": row["guild"],
                     "class": row["class"],
                     "last_activity": row["last_activity"],
+                    "gold": row["gold"],
+                    "played_total": row["played_total"],
+                    "played_level": row["played_level"],
                     "stream_urls": [],
                     "tags": [],
                 }
@@ -298,6 +317,12 @@ PLAYER_NAME_MAX_LENGTH = 24
 GUILD_MAX_LENGTH = 100
 ZONE_MAX_LENGTH = 100
 XP_SANITY_CEILING = 10_000_000  # not a real curve check, just rejects garbage magnitudes
+# Gold is counted in copper. Classic's hard cap is a signed 32-bit copper
+# value, so anything past that is corruption rather than wealth.
+GOLD_MAX_COPPER = 2_147_483_647
+# Seconds. Around eleven years of playtime -- not a number a real
+# character reaches, but small enough to catch a garbled field.
+PLAYED_MAX_SECONDS = 350_000_000
 
 # --- INGESTION ENDPOINT ---
 def default_state():
@@ -307,7 +332,8 @@ def default_state():
     return {
         "level": 1, "current_xp": 0, "max_xp": 1, "pct": 0,
         "last_updated": None, "current_zone": None, "faction": None, "guild": None,
-        "class": None, "last_activity": None, "stream_urls": [], "tags": [],
+        "class": None, "last_activity": None, "gold": None,
+        "played_total": None, "played_level": None, "stream_urls": [], "tags": [],
     }
 
 
@@ -449,6 +475,64 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                     VALUES (?, ?, ?, ?, ?, ?)
                 """, (payload.timestamp, player_name, log_type, quest_id, xp_reward,
                       event_time.isoformat() if event_time else None))
+
+            elif log_type == "STATUS":
+                # level,current_xp,max_xp,gold,played_total,played_level -- the
+                # addon's snapshot of where a character stands. It carries level
+                # and XP because a character at the level cap never fires an XP
+                # event at all, and gold/playtime because neither has a change
+                # event worth subscribing to.
+                parts = [p.strip() for p in rest.split(",")]
+                if len(parts) < 6:
+                    raise ValueError(f"STATUS needs 6 fields, got {len(parts)}: {rest!r}")
+                level, current_xp, max_xp, gold, played_total, played_level = (int(p) for p in parts[:6])
+                if not (LEVEL_MIN <= level <= LEVEL_MAX):
+                    raise ValueError(f"Level {level} outside valid range {LEVEL_MIN}-{LEVEL_MAX}")
+                if not (0 <= current_xp <= XP_SANITY_CEILING):
+                    raise ValueError(f"current_xp {current_xp} outside sane range")
+                if not (0 <= max_xp <= XP_SANITY_CEILING):
+                    raise ValueError(f"max_xp {max_xp} outside sane range")
+                if max_xp and current_xp > max_xp:
+                    raise ValueError(f"current_xp {current_xp} exceeds max_xp {max_xp}")
+                if not (0 <= gold <= GOLD_MAX_COPPER):
+                    raise ValueError(f"gold {gold} outside sane range")
+                for label, seconds in (("played_total", played_total), ("played_level", played_level)):
+                    if not (0 <= seconds <= PLAYED_MAX_SECONDS):
+                        raise ValueError(f"{label} {seconds} outside sane range")
+                if played_level > played_total:
+                    raise ValueError(f"played_level {played_level} exceeds played_total {played_total}")
+
+                pct = 100.0 if max_xp == 0 else round((current_xp / max_xp) * 100, 2)
+                last_updated = datetime.now().isoformat()
+                state = player_states.setdefault(player_name, default_state())
+                state.update({
+                    "level": level, "current_xp": current_xp, "max_xp": max_xp,
+                    "pct": pct, "last_updated": last_updated, "gold": gold,
+                    # A 0 here means "the addon has no answer yet" rather than
+                    # "zero seconds played", so it is stored as unknown.
+                    "played_total": played_total or None,
+                    "played_level": played_level or None,
+                })
+                await db.execute("""
+                    INSERT INTO player_snapshots
+                        (player, level, current_xp, max_xp, pct, last_updated,
+                         gold, played_total, played_level)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(player) DO UPDATE SET
+                        level=excluded.level, current_xp=excluded.current_xp,
+                        max_xp=excluded.max_xp, pct=excluded.pct,
+                        last_updated=excluded.last_updated, gold=excluded.gold,
+                        played_total=excluded.played_total,
+                        played_level=excluded.played_level
+                """, (player_name, level, current_xp, max_xp, pct, last_updated,
+                      gold, state["played_total"], state["played_level"]))
+                await db.execute("""
+                    INSERT INTO xp_history
+                        (timestamp, player, log_type, level, current_xp, max_xp,
+                         event_time, gold, played_total)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (payload.timestamp, player_name, log_type, level, current_xp, max_xp,
+                      event_time.isoformat() if event_time else None, gold, state["played_total"]))
 
             elif log_type == "DEATH":
                 # level,zone — zone is the remainder, so a comma in a zone name

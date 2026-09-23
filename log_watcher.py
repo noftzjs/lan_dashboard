@@ -131,7 +131,7 @@ def is_well_formed(payload):
     if len(parts) < 2:
         return False
     log_type = parts[1]
-    expected_min_fields = {"ZONE": 3, "PROFILE": 4, "XP": 5, "QUEST": 4, "DEATH": 4}
+    expected_min_fields = {"ZONE": 3, "PROFILE": 4, "XP": 5, "QUEST": 4, "DEATH": 4, "STATUS": 8}
     minimum = expected_min_fields.get(log_type)
     if minimum is None:
         return False
