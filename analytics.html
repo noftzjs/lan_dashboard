@@ -152,6 +152,7 @@
             ["Levels gained", fmt(t.levels_gained), "across everyone"],
             ["Quests turned in", fmt(t.quests), `${fmt(t.quest_xp)} XP rewarded`],
             ["XP recorded", fmt(t.xp_recorded), timed ? `${fmt(timed)} events timed` : "no timed events yet"],
+            ["Deaths", fmt(t.deaths), t.deaths ? "across everyone" : "nobody has died yet"],
         ];
         document.getElementById("kpis").innerHTML = tiles.map(([label, value, sub]) => `
             <div class="kpi">
@@ -338,7 +339,7 @@
             <thead><tr>
                 <th>Character</th><th>Class</th><th>Faction</th>
                 <th class="num">Level</th><th class="num">Progress</th>
-                <th class="num">Quests</th><th>Zone</th><th>Status</th>
+                <th class="num">Quests</th><th class="num">Deaths</th><th>Zone</th><th>Status</th>
             </tr></thead>
             <tbody>${players.map(p => {
                 const idle = p.idle_seconds === null || p.idle_seconds > staleAfter;
@@ -349,6 +350,7 @@
                     <td class="num">${p.level}</td>
                     <td class="num">${p.pct}%</td>
                     <td class="num">${fmt(p.quests)}</td>
+                    <td class="num">${fmt(p.deaths)}</td>
                     <td>${escapeHtml(p.zone || "—")}</td>
                     <td>${idle ? "Idle" : "Active"}</td>
                 </tr>`;

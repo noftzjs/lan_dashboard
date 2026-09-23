@@ -8,6 +8,7 @@ LanFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA") -- Fires on dungeon transitions 
 LanFrame:RegisterEvent("ZONE_CHANGED")          -- Fires when stepping over subzone thresholds
 LanFrame:RegisterEvent("PLAYER_ENTERING_WORLD") -- Fires on login/ui reload/zone transitions
 LanFrame:RegisterEvent("PLAYER_GUILD_UPDATE")   -- Fires when the player joins/leaves/is kicked from a guild
+LanFrame:RegisterEvent("PLAYER_DEAD")           -- Fires on death — the LAN's favourite statistic
 -- COMBAT_LOG_EVENT_UNFILTERED intentionally NOT registered: Blizzard has
 -- removed addon access to it entirely in the Midnight beta (interface
 -- 16001+) — RegisterEvent() on it is flatly forbidden and throws
@@ -267,6 +268,15 @@ LanFrame:SetScript("OnEvent", function(self, event, ...)
         addScore(LDB_WEIGHT_QUEST, "quest")
         print(string.format("|cffe8a33d[LAN Dashboard] Score: %d|r", LDB_score))
 
+    -- 3b. DEATHS
+    -- Level and zone ride along so the dashboard can say *where* someone died
+    -- without having to correlate against the surrounding ZONE events, which
+    -- may not have been queued recently (a death in the same zone as the last
+    -- one emits no ZONE event at all).
+    elseif event == "PLAYER_DEAD" then
+        local deathZone = GetZoneText() or "Unknown"
+        emit(playerName, "DEATH", string.format("%d,%s", UnitLevel("player") or 0, deathZone))
+
     elseif event == "PLAYER_LEVEL_UP" then
         local newLevel = ...
         local maxXP = UnitXPMax("player")
@@ -309,4 +319,4 @@ SlashCmdList["LANDASHBOARD"] = function(msg)
     ))
 end
 
-print("|cffcd7f32LAN Dashboard v2.11.0 Initialized! Type /ldb to check reload-trigger status, /ldb sync to test the sync button.|r")
+print("|cffcd7f32LAN Dashboard v2.12.0 Initialized! Type /ldb to check reload-trigger status, /ldb sync to test the sync button.|r")

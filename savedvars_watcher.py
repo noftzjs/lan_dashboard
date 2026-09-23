@@ -327,7 +327,7 @@ def is_well_formed(payload):
     if len(parts) < 2:
         return False
     log_type = parts[1]
-    expected_min_fields = {"ZONE": 3, "PROFILE": 4, "XP": 5, "QUEST": 4}
+    expected_min_fields = {"ZONE": 3, "PROFILE": 4, "XP": 5, "QUEST": 4, "DEATH": 4}
     minimum = expected_min_fields.get(log_type)
     if minimum is None:
         return False
@@ -370,9 +370,14 @@ def send_packet(server_url, payload, ingestion_token=None, timeout=2.0):
         raise ServerRejected(result.get("detail", "unknown reason"))
 
 
-def watch(config, stop_event):
+def watch(config, stop_event, chosen_path=None):
     """The polling loop. Runs until stop_event is set (console mode never
-    sets it — Ctrl+C ends the process; the tray's Quit does)."""
+    sets it — Ctrl+C ends the process; the tray's Quit does).
+
+    chosen_path is a list the tray drops a newly picked file into; the loop
+    checks it each pass. A list rather than a callback so the picker's thread
+    never touches the loop's own variables."""
+    chosen_path = chosen_path if chosen_path is not None else []
     state = load_state()
     path = config["savedvars_path"]
     poll = config["poll_interval"]
@@ -398,6 +403,20 @@ def watch(config, stop_event):
     announced_waiting = False
 
     while not stop_event.is_set():
+        # A path picked from the tray menu wins over whatever we were watching,
+        # including a wrong auto-discovered one — that's the whole point of the
+        # picker. Its own sent_count carries over, since the queue index is per
+        # character-file, and switching files means starting from the top.
+        chosen = chosen_path.pop() if chosen_path else None
+        if chosen and chosen != path:
+            path = chosen
+            state["sent_count"] = 0
+            backed_up_count = 0
+            file_was_missing = not os.path.exists(path)
+            announced_waiting = False
+            save_state(state)
+            say(f"Now watching {path} (chosen from the tray menu)")
+
         if not path:
             # Tray mode: nobody to ask, so keep scanning.
             if time.monotonic() >= next_scan:
@@ -562,6 +581,76 @@ def acquire_single_instance():
     return ctypes.get_last_error() != ERROR_ALREADY_EXISTS
 
 
+# --- Start with Windows -------------------------------------------------------
+# A Run-key registry value rather than a Startup-folder shortcut: it needs no
+# COM/shell plumbing, is one value to read, write and delete, and shows up in
+# Task Manager's Startup tab where a player can also turn it off.
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_VALUE = "LanDashboardWatcher"
+
+
+def _startup_command():
+    """What to register. Only meaningful for the frozen .exe — running from
+    source would need the interpreter path too, which isn't a sane thing to
+    pin into the registry."""
+    return f'"{sys.executable}"'
+
+
+def startup_enabled():
+    if os.name != "nt":
+        return False
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+            value, _ = winreg.QueryValueEx(key, RUN_VALUE)
+            return value == _startup_command()
+    except OSError:
+        return False
+
+
+def set_startup(enabled):
+    """Returns True if the registry now matches what was asked for."""
+    if os.name != "nt":
+        return False
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
+            if enabled:
+                winreg.SetValueEx(key, RUN_VALUE, 0, winreg.REG_SZ, _startup_command())
+            else:
+                # Already off; asking again isn't an error.
+                with contextlib.suppress(FileNotFoundError):
+                    winreg.DeleteValue(key, RUN_VALUE)
+        return True
+    except OSError as e:
+        log_error(f"Couldn't change the start-with-Windows setting: {e}")
+        return False
+
+
+def ask_for_savedvars_file():
+    """Native file picker, so someone with WoW in an unusual place can point
+    at LanDashboard.lua themselves instead of hand-editing JSON. Runs on its
+    own thread with its own Tk root — the tray's event loop owns the main
+    thread, and tkinter must not be driven from two places at once."""
+    try:
+        import tkinter
+        from tkinter import filedialog
+    except ImportError:
+        return None
+    root = tkinter.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        return filedialog.askopenfilename(
+            parent=root,
+            title="Select LanDashboard.lua (inside WTF\\Account\\<account>\\SavedVariables)",
+            filetypes=[("LanDashboard saved variables", "LanDashboard.lua"),
+                       ("Lua files", "*.lua"), ("All files", "*.*")],
+        ) or None
+    finally:
+        root.destroy()
+
+
 class TrayUI:
     def __init__(self, dashboard_url, stop_event):
         # Imported here so console use doesn't need these packages installed.
@@ -572,6 +661,8 @@ class TrayUI:
         self.dashboard_url = dashboard_url
         self.status_text = "Starting..."
         self.level = "wait"
+        # Set by run_tray so the picker can hand a new path to the watch loop.
+        self.on_path_chosen = None
         self.images = {level: self._draw_icon(level) for level in ("ok", "wait", "error")}
         menu = pystray.Menu(
             pystray.MenuItem(lambda _item: self.status_text, None, enabled=False),
@@ -579,6 +670,10 @@ class TrayUI:
             pystray.MenuItem("Open dashboard", self._open_dashboard, default=True),
             pystray.MenuItem("Open log file", self._open_log),
             pystray.MenuItem("Open watcher folder", self._open_folder),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Choose WoW folder...", self._choose_folder),
+            pystray.MenuItem("Start with Windows", self._toggle_startup, checked=lambda _item: startup_enabled()),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self._quit),
         )
         self.icon = pystray.Icon("lan_dashboard_watcher", self.images["wait"], "LAN Dashboard Watcher", menu)
@@ -624,6 +719,30 @@ class TrayUI:
     def _open_folder(self, *_pystray_args):
         os.startfile(SCRIPT_DIR)
 
+    def _toggle_startup(self, *_pystray_args):
+        wanted = not startup_enabled()
+        if set_startup(wanted):
+            say(f"Start with Windows turned {'on' if wanted else 'off'}.")
+        else:
+            self.notify("Couldn't change the start-with-Windows setting. See the log.")
+        with contextlib.suppress(Exception):
+            self.icon.update_menu()
+
+    def _choose_folder(self, *_pystray_args):
+        # The picker blocks until the player answers, so it can't run on the
+        # tray's own thread without freezing the menu.
+        threading.Thread(target=self._choose_folder_worker, daemon=True).start()
+
+    def _choose_folder_worker(self):
+        chosen = ask_for_savedvars_file()
+        if not chosen:
+            return
+        if os.path.basename(chosen).lower() != "landashboard.lua":
+            self.notify("That isn't LanDashboard.lua. Look inside WTF\\Account\\<account>\\SavedVariables.")
+            return
+        if self.on_path_chosen:
+            self.on_path_chosen(chosen)
+
     def _quit(self, *_pystray_args):
         self.stop_event.set()
         self.icon.stop()
@@ -659,8 +778,26 @@ def run_tray(config, args):
         show_message(f"The tray libraries are missing ({e}). "
                      "Install them with: pip install -r requirements-watcher.txt", error=True)
         return
+    chosen_path = []
+
+    def remember_choice(path):
+        chosen_path.append(path)
+        # Write it to the config too, so the choice survives a restart and the
+        # player never has to pick twice.
+        try:
+            saved = {}
+            if os.path.exists(CONFIG_PATH):
+                with open(CONFIG_PATH, encoding="utf-8") as f:
+                    saved = json.load(f)
+            saved["savedvars_path"] = path
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(saved, f, indent=2)
+        except (OSError, ValueError) as e:
+            log_error(f"Chose {path} but couldn't save it to the config file: {e}")
+
+    TRAY.on_path_chosen = remember_choice
     say("Started in the system tray.")
-    TRAY.run(lambda: watch(config, stop_event), run_seconds=args.run_seconds)
+    TRAY.run(lambda: watch(config, stop_event, chosen_path), run_seconds=args.run_seconds)
 
 
 def trim_log():
