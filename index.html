@@ -281,7 +281,7 @@
                 <td class="num lvl">${player.level}</td>
                 <td>
                     <div class="pbar"><i style="width:${player.pct}%"></i></div>
-                    <div class="ppct">${player.pct}% · ${player.current_xp.toLocaleString()} / ${player.max_xp.toLocaleString()}</div>
+                    <div class="ppct">${progressText(player)}</div>
                 </td>
                 <td class="zone" title="${escapeHtml(player.current_zone || "")}">${escapeHtml(player.current_zone || "—")}</td>
                 <td class="num csub">${lastSyncLabel(player)}</td>
@@ -309,7 +309,7 @@
                 </div>
                 <div class="right">
                     <div class="lvl-big">${player.level}</div>
-                    <div class="lvl-cap">Level · ${player.pct}% through</div>
+                    <div class="lvl-cap">${isMaxLevel(player) ? "Level · at the cap" : `Level · ${player.pct}% through`}</div>
                 </div>
                 <div class="hero-xp"><i style="width:${player.pct}%"></i></div>
             </div>`;
@@ -335,7 +335,7 @@
                 </div>
                 <div class="barwrap">
                     <div class="big-bar"><i style="width:${player.pct}%"></i></div>
-                    <div class="pct">${player.pct}% of level ${player.level}</div>
+                    <div class="pct">${isMaxLevel(player) ? `Level ${player.level} · at the cap` : `${player.pct}% of level ${player.level}`}</div>
                 </div>
                 <span class="lvl">${player.level}</span>
             </div>`;

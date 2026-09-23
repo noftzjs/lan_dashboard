@@ -172,6 +172,22 @@ local function tryFlush(reasonLabel)
     syncButton:Show()
 end
 
+-- The character's current level and XP, sent as-is rather than waiting for
+-- a change. PLAYER_XP_UPDATE only fires when XP actually moves, so a
+-- character that cannot gain XP — at the level cap, which on this beta is
+-- 20 — never sent any, and sat on the server's default level 1 no matter
+-- what else it did. Sending this at every genuine login also re-syncs
+-- anyone who levelled while their watcher was closed.
+local function sendStatus(playerName)
+    local level = UnitLevel("player") or 1
+    local currentXP = UnitXP("player") or 0
+    -- At the cap the game reports 0 XP required for the next level, because
+    -- there isn't one. Passed straight through rather than faked into a
+    -- number; the server reads a 0 here as "at the cap".
+    local maxXP = UnitXPMax("player") or 0
+    emit(playerName, "XP", string.format("%d,%d,%d", level, currentXP, maxXP))
+end
+
 -- Shared by login and by any later change to faction/class/guild, so a
 -- player who changes guilds mid-session doesn't stay stale on the
 -- dashboard until their next login.
@@ -208,6 +224,9 @@ LanFrame:SetScript("OnEvent", function(self, event, ...)
             -- Also check the zone right away upon loading into the game
             currentZone = GetZoneText() or "Unknown"
             emit(playerName, "ZONE", currentZone)
+
+            -- ...and the level/XP, which otherwise only arrive when they change
+            sendStatus(playerName)
 
             -- The PROFILE/ZONE just queued only exist in memory until
             -- SavedVariables is written, and nothing else would prompt for
@@ -319,4 +338,4 @@ SlashCmdList["LANDASHBOARD"] = function(msg)
     ))
 end
 
-print("|cffcd7f32LAN Dashboard v2.12.0 Initialized! Type /ldb to check reload-trigger status, /ldb sync to test the sync button.|r")
+print("|cffcd7f32LAN Dashboard v2.13.0 Initialized! Type /ldb to check reload-trigger status, /ldb sync to test the sync button.|r")

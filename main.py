@@ -404,11 +404,14 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                     raise ValueError(f"Level {level} outside valid range {LEVEL_MIN}-{LEVEL_MAX}")
                 if not (0 <= current_xp <= XP_SANITY_CEILING):
                     raise ValueError(f"current_xp {current_xp} outside sane range")
-                if not (1 <= max_xp <= XP_SANITY_CEILING):
+                # 0 is what the game reports at the level cap: there is no
+                # next level to be a fraction of. Accepted rather than
+                # rejected, since a capped character still has to appear.
+                if not (0 <= max_xp <= XP_SANITY_CEILING):
                     raise ValueError(f"max_xp {max_xp} outside sane range")
-                if current_xp > max_xp:
+                if max_xp and current_xp > max_xp:
                     raise ValueError(f"current_xp {current_xp} exceeds max_xp {max_xp}")
-                pct = round((current_xp / max_xp) * 100, 2) if max_xp > 0 else 0
+                pct = 100.0 if max_xp == 0 else round((current_xp / max_xp) * 100, 2)
                 last_updated = datetime.now().isoformat()
 
                 state = player_states.setdefault(player_name, default_state())
@@ -834,6 +837,7 @@ async def get_analytics():
             "guild": state.get("guild"),
             "level": state.get("level", 1),
             "pct": state.get("pct", 0),
+            "max_xp": state.get("max_xp", 1),   # 0 means the character is at the level cap
             "zone": state.get("current_zone"),
             "idle_seconds": idle_seconds(state),
             "quests": quest_count.get(name, 0),

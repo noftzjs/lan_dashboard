@@ -179,6 +179,18 @@ async function postRosterMeta(name, streamsCsv, tagsCsv) {
     return body;
 }
 
+// A max_xp of 0 is the game's way of saying "no next level" — the character
+// is at the cap, so a percentage of nothing is meaningless and the bar is
+// full. Shared so every view words it the same way.
+function isMaxLevel(player) {
+    return player.max_xp === 0;
+}
+
+function progressText(player) {
+    if (isMaxLevel(player)) return "Level cap reached";
+    return `${player.pct}% · ${player.current_xp.toLocaleString()} / ${player.max_xp.toLocaleString()}`;
+}
+
 // Live updates arrive continuously (a websocket message per game event).
 // Rebuilding a list with container.innerHTML = html destroys and recreates
 // every element on every update, which is what caused the focus-loss and

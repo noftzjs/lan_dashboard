@@ -348,7 +348,7 @@
                     <td style="color:${CLASS_COLORS[p.class] || "var(--text-muted)"}">${escapeHtml(p.class || "—")}</td>
                     <td class="${p.faction === "Alliance" ? "faction-alliance" : p.faction === "Horde" ? "faction-horde" : ""}">${escapeHtml(p.faction || "—")}</td>
                     <td class="num">${p.level}</td>
-                    <td class="num">${p.pct}%</td>
+                    <td class="num">${p.max_xp === 0 ? "MAX" : p.pct + "%"}</td>
                     <td class="num">${fmt(p.quests)}</td>
                     <td class="num">${fmt(p.deaths)}</td>
                     <td>${escapeHtml(p.zone || "—")}</td>
