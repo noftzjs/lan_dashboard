@@ -9,6 +9,7 @@ LanFrame:RegisterEvent("ZONE_CHANGED")          -- Fires when stepping over subz
 LanFrame:RegisterEvent("PLAYER_ENTERING_WORLD") -- Fires on login/ui reload/zone transitions
 LanFrame:RegisterEvent("PLAYER_GUILD_UPDATE")   -- Fires when the player joins/leaves/is kicked from a guild
 LanFrame:RegisterEvent("PLAYER_DEAD")           -- Fires on death — the LAN's favourite statistic
+LanFrame:RegisterEvent("TIME_PLAYED_MSG")       -- The reply to RequestTimePlayed()
 -- COMBAT_LOG_EVENT_UNFILTERED intentionally NOT registered: Blizzard has
 -- removed addon access to it entirely in the Midnight beta (interface
 -- 16001+) — RegisterEvent() on it is flatly forbidden and throws
@@ -172,12 +173,20 @@ local function tryFlush(reasonLabel)
     syncButton:Show()
 end
 
--- The character's current level and XP, sent as-is rather than waiting for
--- a change. PLAYER_XP_UPDATE only fires when XP actually moves, so a
--- character that cannot gain XP — at the level cap, which on this beta is
--- 20 — never sent any, and sat on the server's default level 1 no matter
--- what else it did. Sending this at every genuine login also re-syncs
--- anyone who levelled while their watcher was closed.
+--============================================================
+-- STATUS: the whole "where this character stands" snapshot
+-- Level and XP are here because PLAYER_XP_UPDATE only fires when XP moves,
+-- so a character that cannot gain XP — at the level cap, 20 on this beta —
+-- never sent any and sat on the server's default level 1. Gold and time
+-- played ride along because they have no change event worth listening to:
+-- gold moves on every loot and vendor sale, and time played only exists
+-- when asked for. Sampling all of it together at a few meaningful moments
+-- is both cheaper and more useful than chasing each one separately.
+--============================================================
+local LDB_playedTotal, LDB_playedLevel = 0, 0   -- seconds, from TIME_PLAYED_MSG
+local LDB_awaitingPlayed = false                -- a reply we asked for is in flight
+local LDB_statusPending = false                 -- ...and a STATUS is waiting on it
+
 local function sendStatus(playerName)
     local level = UnitLevel("player") or 1
     local currentXP = UnitXP("player") or 0
@@ -185,7 +194,55 @@ local function sendStatus(playerName)
     -- there isn't one. Passed straight through rather than faked into a
     -- number; the server reads a 0 here as "at the cap".
     local maxXP = UnitXPMax("player") or 0
-    emit(playerName, "XP", string.format("%d,%d,%d", level, currentXP, maxXP))
+    -- Copper, the unit the game counts in. Converting to gold is the
+    -- dashboard's job, so no precision is thrown away here.
+    local money = (GetMoney and GetMoney()) or 0
+    emit(playerName, "STATUS", string.format("%d,%d,%d,%d,%d,%d",
+        level, currentXP, maxXP, money, LDB_playedTotal, LDB_playedLevel))
+end
+
+-- Time played is only knowable by asking the server and waiting for the
+-- reply, so a status send becomes: ask, then emit when the answer lands.
+-- The timer is the safety net — if the reply never comes (a disconnect at
+-- the wrong moment), the snapshot still goes out with whatever played
+-- figures we last had rather than being dropped.
+local function requestStatus(playerName)
+    if not RequestTimePlayed then
+        sendStatus(playerName)
+        return
+    end
+    LDB_statusPending = true
+    LDB_awaitingPlayed = true
+    RequestTimePlayed()
+    C_Timer.After(5, function()
+        LDB_awaitingPlayed = false
+        if LDB_statusPending then
+            LDB_statusPending = false
+            sendStatus(playerName)
+        end
+    end)
+end
+
+-- Asking for time played makes the server print the usual /played lines to
+-- chat. Only the ones this addon asked for are hidden — a player typing
+-- /played themselves still sees their answer. Matching is done against the
+-- game's own localised templates rather than English text.
+local function looksLikeTimePlayedLine(message)
+    for _, template in ipairs({ TIME_PLAYED_TOTAL, TIME_PLAYED_LEVEL }) do
+        if type(template) == "string" then
+            local prefix = template:match("^(.-)%%s")
+            if prefix and prefix ~= "" and message:sub(1, #prefix) == prefix then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+if ChatFrame_AddMessageEventFilter then
+    ChatFrame_AddMessageEventFilter("CHAT_MSG_SYSTEM", function(_, _, message)
+        return LDB_awaitingPlayed and looksLikeTimePlayedLine(message or "")
+    end)
 end
 
 -- Shared by login and by any later change to faction/class/guild, so a
@@ -225,8 +282,9 @@ LanFrame:SetScript("OnEvent", function(self, event, ...)
             currentZone = GetZoneText() or "Unknown"
             emit(playerName, "ZONE", currentZone)
 
-            -- ...and the level/XP, which otherwise only arrive when they change
-            sendStatus(playerName)
+            -- ...and the full snapshot (level, XP, gold, time played), which
+            -- otherwise only arrives when one of those happens to change.
+            requestStatus(playerName)
 
             -- The PROFILE/ZONE just queued only exist in memory until
             -- SavedVariables is written, and nothing else would prompt for
@@ -292,6 +350,16 @@ LanFrame:SetScript("OnEvent", function(self, event, ...)
     -- without having to correlate against the surrounding ZONE events, which
     -- may not have been queued recently (a death in the same zone as the last
     -- one emits no ZONE event at all).
+    elseif event == "TIME_PLAYED_MSG" then
+        local totalSeconds, levelSeconds = ...
+        LDB_playedTotal = totalSeconds or LDB_playedTotal
+        LDB_playedLevel = levelSeconds or LDB_playedLevel
+        LDB_awaitingPlayed = false
+        if LDB_statusPending then
+            LDB_statusPending = false
+            sendStatus(playerName)
+        end
+
     elseif event == "PLAYER_DEAD" then
         local deathZone = GetZoneText() or "Unknown"
         emit(playerName, "DEATH", string.format("%d,%s", UnitLevel("player") or 0, deathZone))
@@ -301,6 +369,8 @@ LanFrame:SetScript("OnEvent", function(self, event, ...)
         local maxXP = UnitXPMax("player")
         emit(playerName, "XP", string.format("%d,0,%d", newLevel, maxXP))
         addScore(LDB_WEIGHT_LEVEL, "level up")
+        -- The per-level timer restarts here, and gold has usually moved too.
+        requestStatus(playerName)
 
     -- 4. RELOAD-TRIGGER SAFE WINDOWS (kill-based scoring removed — see the
     -- COMBAT_LOG_EVENT_UNFILTERED registration comment above)
@@ -338,4 +408,4 @@ SlashCmdList["LANDASHBOARD"] = function(msg)
     ))
 end
 
-print("|cffcd7f32LAN Dashboard v2.13.0 Initialized! Type /ldb to check reload-trigger status, /ldb sync to test the sync button.|r")
+print("|cffcd7f32LAN Dashboard v3.0.0 Initialized! Type /ldb to check reload-trigger status, /ldb sync to test the sync button.|r")

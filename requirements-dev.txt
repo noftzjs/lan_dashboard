@@ -1,0 +1,6 @@
+# Test + lint tooling. Not needed to run the server (see requirements.txt)
+# or to build the watcher (see requirements-watcher.txt).
+#   pip install -r requirements-dev.txt && python -m pytest
+pytest>=8.0.0
+httpx>=0.27.0
+ruff>=0.5.0
