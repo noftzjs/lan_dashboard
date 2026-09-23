@@ -92,11 +92,31 @@ function detectStreamPlatform(url) {
 // a glance in a 20px badge without pulling in external logo assets (this
 // project avoids runtime CDN dependencies for LAN-reliability reasons).
 const STREAM_PLATFORM_ICONS = {
-    twitch: `<svg viewBox="0 0 24 24"><rect width="24" height="24" rx="6" fill="#9146FF"/><rect x="8" y="6" width="2.6" height="10" fill="#fff"/><rect x="13.4" y="6" width="2.6" height="10" fill="#fff"/></svg>`,
-    youtube: `<svg viewBox="0 0 24 24"><rect width="24" height="24" rx="6" fill="#FF0000"/><path d="M9.5 7.5l7 4.5-7 4.5v-9z" fill="#fff"/></svg>`,
-    kick: `<svg viewBox="0 0 24 24"><rect width="24" height="24" rx="6" fill="#53FC18"/><text x="12" y="16.5" font-size="12" font-weight="800" text-anchor="middle" fill="#000">K</text></svg>`,
-    other: `<svg viewBox="0 0 24 24"><rect width="24" height="24" rx="6" style="fill:var(--border-color)"/><path d="M9.5 7.5l7 4.5-7 4.5v-9z" fill="#fff"/></svg>`,
+    // All four are drawn on the same 24x24 grid and optically centred on
+    // (12, 12) — the earlier set was centred a unit off, which showed as a
+    // lopsided glyph once the badge sat next to a 30px name in Big screen.
+    // A play triangle's centroid is a third of its width from the base, so
+    // its points are chosen to put that centroid on 12, not its bounding box.
+    twitch: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="6" fill="#9146FF"/><rect x="8.2" y="7" width="2.6" height="10" rx="1" fill="#fff"/><rect x="13.2" y="7" width="2.6" height="10" rx="1" fill="#fff"/></svg>`,
+    youtube: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="6" fill="#FF0000"/><path d="M9.8 7.4 L16.8 12 L9.8 16.6 Z" fill="#fff"/></svg>`,
+    kick: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="6" fill="#53FC18"/><path d="M7.4 6.6h3.1v3.6l3.1-3.6h3.9l-4.2 5.4 4.2 5.4h-3.9l-3.1-3.7v3.7H7.4z" fill="#000"/></svg>`,
+    other: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="6" fill="#3b3b46"/><path d="M9.8 7.4 L16.8 12 L9.8 16.6 Z" fill="#e8e8ef"/></svg>`,
 };
+
+// One badge per link. Shared by both dashboard layouts so the markup, the
+// safe-URL check and the platform detection can't drift apart between them.
+const STREAM_PLATFORM_LABELS = { twitch: "Twitch", youtube: "YouTube", kick: "Kick", other: "their stream" };
+
+function streamBadgesHtml(player) {
+    const links = (player.stream_urls || []).map(safeUrl).filter(Boolean);
+    if (!links.length) return "";
+    const badges = links.map(href => {
+        const platform = detectStreamPlatform(href);
+        return `<a class="stream-badge" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer"
+                   title="Watch on ${STREAM_PLATFORM_LABELS[platform]}">${STREAM_PLATFORM_ICONS[platform]}</a>`;
+    }).join("");
+    return `<span class="stream-badges">${badges}</span>`;
+}
 
 // Connects the shared websocket feed. onUpdate is called after playerData
 // changes, so each page can re-render however it needs to.
@@ -129,20 +149,28 @@ function connectWebSocket(onUpdate) {
 // immediate feedback; the server enforces its own limits regardless of
 // what any client sends.
 const TAG_MAX_LENGTH = 30;
-const TAGS_MAX_COUNT = 10;
+const TAGS_MAX_COUNT = 3;
+const STREAM_URLS_MAX_COUNT = 3;
 
 // Persists a stream link / tag edit. tagsCsv is the raw comma-separated
 // text as typed; splitting/trimming happens here so both pages agree on
 // the rules. Returns the server's response body ({status, state}).
-async function postRosterMeta(name, streamUrl, tagsCsv) {
+async function postRosterMeta(name, streamsCsv, tagsCsv) {
     const tags = (tagsCsv ?? "").split(",")
         .map(t => t.trim().slice(0, TAG_MAX_LENGTH))
         .filter(Boolean)
         .slice(0, TAGS_MAX_COUNT);
+    // Comma-separated like tags. A comma is legal in a URL but effectively
+    // never appears in a channel link, and one field per platform would mean
+    // rebuilding the roster row every time a new platform shows up.
+    const stream_urls = (streamsCsv ?? "").split(",")
+        .map(u => u.trim())
+        .filter(Boolean)
+        .slice(0, STREAM_URLS_MAX_COUNT);
     const response = await fetch(`${API_BASE}/api/roster/${encodeURIComponent(name)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ stream_url: streamUrl ?? "", tags }),
+        body: JSON.stringify({ stream_urls, tags }),
     });
     const body = await response.json();
     if (body.state) {

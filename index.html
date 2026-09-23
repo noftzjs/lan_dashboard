@@ -48,6 +48,9 @@
             top: 0;
             z-index: 1;
         }
+        /* `table.ladder th` (0-1-2) outranks `.num` (0-1-0), so a header cell
+           kept its left alignment while the numbers under it went right. */
+        table.ladder th.num { text-align: right; }
         table.ladder td { padding: 8px; border-bottom: 1px solid #1e1e25; vertical-align: middle; }
         table.ladder tbody tr:last-child td { border-bottom: none; }
         table.ladder tbody tr:hover td { background-color: var(--card-color-hover); }
@@ -107,6 +110,13 @@
         .big-bar { height: 7px; background-color: #24242c; border-radius: 4px; overflow: hidden; }
         .big-bar i { display: block; height: 100%; background-color: var(--bar-color); border-radius: 4px; }
         .big-row.idle-row { opacity: 0.62; }
+
+        /* The hero's name line isn't flex, so the badges bring their own
+           spacing; sized up alongside the bigger type in each context. */
+        .stream-badges { display: inline-flex; align-items: center; gap: 5px; vertical-align: middle; }
+        .hero .who .stream-badges { margin-left: 10px; }
+        .hero .stream-badge { width: 26px; height: 26px; }
+        .big-row .stream-badge { width: 22px; height: 22px; }
 
         .empty-state { text-align: center; padding: 40px 10px; color: var(--text-muted); }
 
@@ -236,15 +246,6 @@
         return `${Math.floor(seconds / 86400)}d ago`;
     }
 
-    function streamBadgeHtml(player) {
-        const href = safeUrl(player.stream_url);
-        if (!href) return "";
-        const platform = detectStreamPlatform(href);
-        const label = { twitch: "Twitch", youtube: "YouTube", kick: "Kick", other: "their stream" }[platform];
-        return `<a class="stream-badge" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer"
-                   title="Watch on ${label}">${STREAM_PLATFORM_ICONS[platform]}</a>`;
-    }
-
     function tagChipsHtml(player) {
         return (player.tags || [])
             .map(t => `<span class="tag-chip" title="${escapeHtml(t)}">${escapeHtml(t)}</span>`)
@@ -264,7 +265,7 @@
         // Angle brackets are the guild convention in WoW, so they're entities
         // rather than literal < >, which the browser would treat as a tag.
         const sub = [
-            player.class ? escapeHtml(player.class) : "",
+            player.class ? `<span style="color:${classColor}">${escapeHtml(player.class)}</span>` : "",
             player.guild ? `&lt;${escapeHtml(player.guild)}&gt;` : "",
         ].filter(Boolean).join(" · ");
         const tags = tagChipsHtml(player);
@@ -272,7 +273,7 @@
             <tr id="${playerElementId("row", player.name)}" class="${isStale(player) ? "idle-row" : ""}">
                 <td class="rk${rankClass(rank, ranked)}">${rank}</td>
                 <td>
-                    <div class="cname" style="color:${classColor}">${escapeHtml(player.name)}${streamBadgeHtml(player)}</div>
+                    <div class="cname" style="color:${classColor}">${escapeHtml(player.name)}${streamBadgesHtml(player)}</div>
                     <div class="csub">${sub || "No profile yet"}</div>
                     ${tags ? `<div class="tag-row" style="margin-top:4px">${tags}</div>` : ""}
                 </td>
@@ -292,17 +293,19 @@
         const factionClass = player.faction === "Alliance" ? "faction-alliance"
             : player.faction === "Horde" ? "faction-horde" : "";
         const meta = [
-            player.class ? escapeHtml(player.class) : "",
+            player.class ? `<span style="color:${classColor}">${escapeHtml(player.class)}</span>` : "",
             player.faction ? `<span class="${factionClass}">${escapeHtml(player.faction)}</span>` : "",
             player.guild ? escapeHtml(player.guild) : "",
             player.current_zone ? escapeHtml(player.current_zone) : "",
         ].filter(Boolean).join(" · ");
+        const heroTags = tagChipsHtml(player);
         return `
             <div class="hero" id="${playerElementId("hero", player.name)}">
                 <div>
                     <div class="crown">★ Leader</div>
-                    <div class="who" style="color:${classColor}">${escapeHtml(player.name)}${streamBadgeHtml(player)}</div>
+                    <div class="who" style="color:${classColor}">${escapeHtml(player.name)}${streamBadgesHtml(player)}</div>
                     <div class="meta">${meta || "No profile data yet"}</div>
+                    ${heroTags ? `<div class="tag-row" style="margin-top:8px">${heroTags}</div>` : ""}
                 </div>
                 <div class="right">
                     <div class="lvl-big">${player.level}</div>
@@ -314,13 +317,21 @@
 
     function buildBigRow(player, rank) {
         const classColor = CLASS_COLORS[player.class] || "var(--text-color)";
-        const meta = [player.class, player.current_zone].filter(Boolean).map(escapeHtml).join(" · ");
+        const factionClass = player.faction === "Alliance" ? "faction-alliance"
+            : player.faction === "Horde" ? "faction-horde" : "";
+        const meta = [
+            player.class ? `<span style="color:${classColor}">${escapeHtml(player.class)}</span>` : "",
+            player.faction ? `<span class="${factionClass}">${escapeHtml(player.faction)}</span>` : "",
+            player.current_zone ? escapeHtml(player.current_zone) : "",
+        ].filter(Boolean).join(" · ");
+        const rowTags = tagChipsHtml(player);
         return `
             <div class="big-row ${isStale(player) ? "idle-row" : ""}" id="${playerElementId("big", player.name)}">
                 <span class="rank">${rank}</span>
                 <div>
-                    <div class="name" style="color:${classColor}">${escapeHtml(player.name)}${streamBadgeHtml(player)}</div>
+                    <div class="name" style="color:${classColor}">${escapeHtml(player.name)}${streamBadgesHtml(player)}</div>
                     <div class="meta">${meta || "No profile yet"}</div>
+                    ${rowTags ? `<div class="tag-row" style="margin-top:6px">${rowTags}</div>` : ""}
                 </div>
                 <div class="barwrap">
                     <div class="big-bar"><i style="width:${player.pct}%"></i></div>

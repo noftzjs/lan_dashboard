@@ -345,7 +345,7 @@
                 const idle = p.idle_seconds === null || p.idle_seconds > staleAfter;
                 return `<tr>
                     <td><span class="who">${classChip(p.class)}<span class="nm">${escapeHtml(p.name)}</span></span></td>
-                    <td>${escapeHtml(p.class || "—")}</td>
+                    <td style="color:${CLASS_COLORS[p.class] || "var(--text-muted)"}">${escapeHtml(p.class || "—")}</td>
                     <td class="${p.faction === "Alliance" ? "faction-alliance" : p.faction === "Horde" ? "faction-horde" : ""}">${escapeHtml(p.faction || "—")}</td>
                     <td class="num">${p.level}</td>
                     <td class="num">${p.pct}%</td>

@@ -76,7 +76,7 @@
                     <th class="sortable" data-sort="faction">Faction <span class="sort-indicator"></span></th>
                     <th class="sortable" data-sort="class">Class <span class="sort-indicator"></span></th>
                     <th class="sortable" data-sort="guild">Guild <span class="sort-indicator"></span></th>
-                    <th>Stream Link</th>
+                    <th>Stream Links</th>
                     <th>Tags</th>
                     <th></th>
                 </tr>
@@ -98,7 +98,7 @@
         const draft = editDrafts[name];
         if (!draft) return false;
         const committedTags = (player.tags || []).join(", ");
-        return draft.streamUrl !== (player.stream_url || "") || draft.tags !== committedTags;
+        return draft.streams !== (player.stream_urls || []).join(", ") || draft.tags !== committedTags;
     }
 
     async function saveRow(name) {
@@ -106,7 +106,7 @@
         const button = document.querySelector(`[data-action="save"][data-name="${CSS.escape(name)}"]`);
         if (button) button.disabled = true;
         try {
-            const result = await postRosterMeta(name, draft.streamUrl, draft.tags);
+            const result = await postRosterMeta(name, draft.streams, draft.tags);
             saveStatus[name] = result.status === "success" ? "Saved" : "Failed";
         } catch (e) {
             console.error("Failed to save roster info for", name, e);
@@ -123,7 +123,7 @@
             : player.faction === "Horde" ? "faction-horde" : "";
         const classColor = CLASS_COLORS[player.class] || "var(--text-color)";
         const draft = editDrafts[player.name] || {
-            streamUrl: player.stream_url || "",
+            streams: (player.stream_urls || []).join(", "),
             tags: (player.tags || []).join(", "),
         };
         const dirty = isDirty(player.name, player);
@@ -139,11 +139,13 @@
                 <td style="color:${classColor}">${escapeHtml(player.class || "—")}</td>
                 <td>${escapeHtml(player.guild || "—")}</td>
                 <td class="col-input">
-                    <input type="text" placeholder="https://twitch.tv/..." value="${escapeHtml(draft.streamUrl)}"
-                           data-field="streamUrl" data-name="${safeName}">
+                    <input type="text" placeholder="https://twitch.tv/... , https://kick.com/..."
+                           title="Up to three links, separated by commas"
+                           value="${escapeHtml(draft.streams)}"
+                           data-field="streams" data-name="${safeName}">
                 </td>
                 <td class="col-input col-tags">
-                    <input type="text" placeholder="Team Alpha, LAN local" value="${escapeHtml(draft.tags)}"
+                    <input type="text" placeholder="Up to 3 tags, comma separated" value="${escapeHtml(draft.tags)}"
                            data-field="tags" data-name="${safeName}">
                 </td>
                 <td style="white-space:nowrap;">
@@ -184,7 +186,7 @@
         const field = e.target.closest("[data-field]");
         if (!field) return;
         const draft = editDrafts[field.dataset.name] || (editDrafts[field.dataset.name] = {
-            streamUrl: (playerData[field.dataset.name] || {}).stream_url || "",
+            streams: ((playerData[field.dataset.name] || {}).stream_urls || []).join(", "),
             tags: ((playerData[field.dataset.name] || {}).tags || []).join(", "),
         });
         draft[field.dataset.field] = field.value;

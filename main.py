@@ -179,9 +179,32 @@ async def startup_event():
             CREATE TABLE IF NOT EXISTS player_roster_meta (
                 player TEXT PRIMARY KEY,
                 stream_url TEXT,
+                stream_urls TEXT,
                 tags TEXT,
                 updated_at TEXT
             )
+        """)
+        # stream_url held exactly one link; stream_urls is a JSON list so a
+        # player can have, say, a Twitch and a Kick. The old column is kept
+        # and migrated from rather than dropped, so a rollback still reads.
+        cursor = await db.execute("PRAGMA table_info(player_roster_meta)")
+        if "stream_urls" not in {row[1] for row in await cursor.fetchall()}:
+            await db.execute("ALTER TABLE player_roster_meta ADD COLUMN stream_urls TEXT")
+        await db.execute("""
+            UPDATE player_roster_meta
+               SET stream_urls = json_array(stream_url)
+             WHERE stream_urls IS NULL AND stream_url IS NOT NULL AND stream_url <> ''
+        """)
+
+        # One-time cleanup for zones stored during the window when the addon
+        # already stamped events (v2.11.0+) but this server hadn't been
+        # redeployed to strip that stamp — those rows kept the raw
+        # "<epoch>,Zone Name" string. A zone only re-emits when a character
+        # actually moves, so without this they'd stay wrong for a long time.
+        await db.execute("""
+            UPDATE player_snapshots
+               SET current_zone = substr(current_zone, instr(current_zone, ',') + 1)
+             WHERE current_zone GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9],*'
         """)
         await db.commit()
 
@@ -205,7 +228,7 @@ async def reload_states_from_db():
                     "guild": row["guild"],
                     "class": row["class"],
                     "last_activity": row["last_activity"],
-                    "stream_url": None,
+                    "stream_urls": [],
                     "tags": [],
                 }
 
@@ -213,7 +236,12 @@ async def reload_states_from_db():
             rows = await cursor.fetchall()
             for row in rows:
                 state = player_states.setdefault(row["player"], default_state())
-                state["stream_url"] = row["stream_url"]
+                # Prefer the list; fall back to the single column for a row
+                # written before the migration ran.
+                if row["stream_urls"]:
+                    state["stream_urls"] = json.loads(row["stream_urls"])
+                elif row["stream_url"]:
+                    state["stream_urls"] = [row["stream_url"]]
                 state["tags"] = json.loads(row["tags"]) if row["tags"] else []
 
 # --- WEBSOCKET CONNECTION MANAGER ---
@@ -244,7 +272,8 @@ class LogPayload(BaseModel):
 
 class RosterMetaPayload(BaseModel):
     # Fields left as None are unchanged; send "" / [] explicitly to clear one.
-    stream_url: str | None = None
+    stream_url: str | None = None      # legacy single link, still accepted
+    stream_urls: list[str] | None = None
     tags: list[str] | None = None
 
 # Mirrored in static/dashboard.js for immediate UI feedback, but this is the
@@ -252,8 +281,10 @@ class RosterMetaPayload(BaseModel):
 # what the browser sends. A single unbroken tag with no spaces can't wrap in
 # the UI, so an unbounded one stretches a card/row arbitrarily wide.
 TAG_MAX_LENGTH = 30
-TAGS_MAX_COUNT = 10
+TAGS_MAX_COUNT = 3
 STREAM_URL_MAX_LENGTH = 300
+# More than a few badges crowds the name line on both dashboard layouts.
+STREAM_URLS_MAX_COUNT = 3
 
 # /api/log-update is just parsing a CSV string with no game-state to check
 # it against, so nothing stops a malformed or malicious payload from
@@ -276,7 +307,7 @@ def default_state():
     return {
         "level": 1, "current_xp": 0, "max_xp": 1, "pct": 0,
         "last_updated": None, "current_zone": None, "faction": None, "guild": None,
-        "class": None, "last_activity": None, "stream_url": None, "tags": [],
+        "class": None, "last_activity": None, "stream_urls": [], "tags": [],
     }
 
 
@@ -471,19 +502,29 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
 @app.post("/api/roster/{player_name}")
 async def update_roster_meta(player_name: str, payload: RosterMetaPayload, _user: str = Depends(require_roster_auth)):
     state = player_states.setdefault(player_name, default_state())
-    if payload.stream_url is not None:
-        stream_url = payload.stream_url.strip()[:STREAM_URL_MAX_LENGTH]
-        state["stream_url"] = stream_url or None
+    # stream_urls wins when both are sent; stream_url keeps an older client
+    # (or a stale browser tab) working by being treated as a one-item list.
+    incoming_streams = payload.stream_urls
+    if incoming_streams is None and payload.stream_url is not None:
+        incoming_streams = [payload.stream_url]
+    if incoming_streams is not None:
+        state["stream_urls"] = [
+            url.strip()[:STREAM_URL_MAX_LENGTH] for url in incoming_streams if url.strip()
+        ][:STREAM_URLS_MAX_COUNT]
     if payload.tags is not None:
         state["tags"] = [t.strip()[:TAG_MAX_LENGTH] for t in payload.tags if t.strip()][:TAGS_MAX_COUNT]
 
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("""
-            INSERT INTO player_roster_meta (player, stream_url, tags, updated_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO player_roster_meta (player, stream_url, stream_urls, tags, updated_at)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(player) DO UPDATE SET
-                stream_url=excluded.stream_url, tags=excluded.tags, updated_at=excluded.updated_at
-        """, (player_name, state["stream_url"], json.dumps(state["tags"]), datetime.now().isoformat()))
+                stream_url=excluded.stream_url, stream_urls=excluded.stream_urls,
+                tags=excluded.tags, updated_at=excluded.updated_at
+        """, (player_name,
+              state["stream_urls"][0] if state["stream_urls"] else None,   # keeps the legacy column usable
+              json.dumps(state["stream_urls"]), json.dumps(state["tags"]),
+              datetime.now().isoformat()))
         await db.commit()
 
     await manager.broadcast({
