@@ -80,7 +80,7 @@ Reported from real play on the restyled dashboard. Diagnoses noted where already
   Second half of the same bug: at the cap WoW reports `UnitXPMax` as **0**, and the server's validation demanded `1 <= max_xp`, so the honest payload would have been rejected. `max_xp = 0` is now accepted as "at the level cap" (percentage treated as complete) rather than faked into a number, and all three views say **"Level cap reached" / "at the cap"** instead of showing a meaningless percentage. Garbage is still refused: a negative max, XP above max, and an out-of-range level were all re-checked.
 
 ### Logged 2026-09-22 &mdash; next session
-- [ ] **Put `/analytics` behind the roster password**, same as `/roster`, until it's finished and trusted. One line: add `_user: str = Depends(require_roster_auth)` to `get_analytics_page()` in `main.py`. Decide at the same time whether `GET /api/analytics` should be gated too &mdash; the page is useless without it, so leaving the API open would only be hiding the page, not the data. Note this isn't closing a leak: analytics shows the same player data the public dashboard already does, just aggregated, and no secret is exposed either way. Reverting is deleting the same line.
+- [x] **`/analytics` is behind the roster password**, same as `/roster`. Both the page *and* `GET /api/analytics` are gated &mdash; gating only the page would have hidden the view while leaving the data fetchable. Verified: 401 on both without credentials, 200 with, the public dashboard/setup/leaderboard untouched, and the page still loads its own data once authenticated (the browser reuses the Basic credentials for the same-origin fetch). Reverting is deleting the two `Depends(...)` arguments.
 
 ### Logged 2026-09-22 &mdash; new features
 - [x] **Multiple tags, capped at 3** &mdash; `TAGS_MAX_COUNT` lowered from 10 to 3 on both the server and the client; a fourth tag is dropped server-side (verified).
@@ -110,7 +110,11 @@ Everything here is scoped for the current trusted-LAN deployment and deliberatel
 - [ ] HTTPS/WSS support, so the roster password and game data aren't sent in the clear.
 - [ ] Revisit player-identity keying (currently by character name alone). Blizzard's upcoming "WoW Forever" single-server model with first/last-name identity and PVP/PVE/RP as a per-character setting will change what a unique player key even looks like — confirm the actual model before building name-collision handling around the old Name+Realm assumption.
 - [ ] Guild-name identity has the same shape of problem: the guild filter dropdown treats guild name alone as unique, but two different guilds (one Horde, one Alliance) can share a name today, which would incorrectly merge them into one filter option. Needs disambiguation by (faction, guild name) — or may be moot once "WoW Forever" ships, if its single-server model makes guild names globally unique. Confirm before assuming either way.
-- [ ] Backend test suite (pytest + FastAPI's `TestClient`) covering the parsing/validation edge cases (CSV edge cases, length caps, malformed payloads) — deferred by choice for now; the highest-value, lowest-effort testing investment when picked back up.
+- [x] **Backend test suite** &mdash; 75 tests under `tests/`, run with `python -m pytest`. Four modules: `test_ingestion.py` (payload parsing, comma-bearing guild/zone names, every validation rule, the level cap, event-time sniffing, deaths), `test_auth.py` (all three auth mechanisms and their deliberate failure directions, plus the passphrase bundle and its rate limit), `test_roster_and_analytics.py` (tag/stream caps, legacy single-link clients, and the analytics arithmetic &mdash; level-crossing XP, observed-only level counts, quest bands, velocity), `test_migrations.py` (every startup migration against a database built in an older shape, including that they're idempotent and preserve rows).
+
+  `tests/conftest.py` builds a fresh app per test with its own SQLite file, and **stubs out `load_dotenv` so results never depend on the developer's own `.env`** &mdash; without that, a test unsetting `ROSTER_PASSWORD` to check the fail-closed path would silently get the real one back. Config is read into module-level constants at import, so each configuration means a fresh `importlib.reload`.
+
+  The suite was **mutation-checked**: six deliberate regressions (rejecting capped characters again, raising the tag cap, disabling event-time sniffing, skipping the ingestion-token check, un-gating analytics, and stamping activity on rejected payloads) were each confirmed to make it fail. One test was rewritten after that exercise &mdash; it had been comparing `idle_seconds` values microseconds apart and would have passed by luck.
 
 ---
 
@@ -162,7 +166,13 @@ pyinstaller --onefile --noconsole --name savedvars_watcher --distpath downloads 
 
 Players don't need any of the following, since the setup page walks them through it, but for reference: double-clicking the `.exe` with no arguments triggers auto-discovery of the SavedVariables path (scanning `Program Files (x86)`, `Program Files`, the drive root and a `Games` folder on every drive; for anything else add `"savedvars_path"` to the config file). Settings come from `savedvars_watcher_config.json` next to the `.exe` (`server_url`, `ingestion_token`, optionally `savedvars_path`/`poll_interval`) or, when running the script, from `--server-url`/`--ingestion-token` flags. With a `DOWNLOAD_PASSPHRASE` set (below), the server builds that config file for friends automatically.
 
-### 6. Lint
+### 6. Test and lint
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest        # 75 tests, ~5 seconds, no server or database needed
+```
+The suite runs entirely in-process against a throwaway SQLite file per test, so it's safe to run while the real server is up.
 
 `ruff.toml` holds the project's lint config, so the editor and the command line agree:
 ```bash

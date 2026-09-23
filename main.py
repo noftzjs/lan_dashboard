@@ -743,8 +743,12 @@ def download_watcher_bundle(payload: BundleRequest, request: Request):
 
 
 @app.get("/analytics")
-async def get_analytics_page():
-    """Progression analytics over the stored history."""
+async def get_analytics_page(_user: str = Depends(require_roster_auth)):
+    """Progression analytics over the stored history. Behind the roster
+    password while it's still being built out — gating only the page would
+    hide the view but not the data, so /api/analytics is gated to match.
+    The browser reuses the same Basic credentials for the page's own fetch,
+    since it's the same origin and realm."""
     return FileResponse(os.path.join(PROJECT_DIR, "analytics.html"))
 
 
@@ -775,7 +779,7 @@ def summarise_xp_rows(rows):
 
 
 @app.get("/api/analytics")
-async def get_analytics():
+async def get_analytics(_user: str = Depends(require_roster_auth)):
     """Aggregates for the analytics page. Computed per request by reading the
     history table — fine at LAN scale (tens of thousands of rows at most); if
     this ever gets slow, cache it per DB write rather than sampling."""

@@ -36,3 +36,7 @@ savedvars_watcher.log
 # Local dev tool that feeds fake players to a running server; kept out of the
 # repo by choice, not needed to run the site.
 mock_generator.py
+
+# pytest
+.pytest_cache/
+.ruff_cache/
