@@ -102,6 +102,13 @@ input:focus, select:focus { outline: 1px solid var(--accent-color); }
     vertical-align: bottom;
 }
 
+/* WoW's own coin colours, so money on the dashboard reads the way it does
+   in game. Deliberately no gap between the units: the colour change is what
+   separates them, which keeps the column narrow. */
+.coin-g { color: #ffd700; }
+.coin-s { color: #c7c7cf; }
+.coin-c { color: #eda55f; }
+
 /* Streaming badge */
 /* A plain channel-link icon — deliberately makes no live/offline claim,
    since we have no way to check real-time status without polling each

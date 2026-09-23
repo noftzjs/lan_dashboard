@@ -192,23 +192,40 @@ function progressText(player) {
 }
 
 // Copper is what the game counts in and what the server stores, so the
-// conversion to g/s/c lives here, at the point of display. Only the largest
-// meaningful unit is shown to keep a table column narrow; the exact amount
-// goes in the title attribute.
+// conversion to g/s/c lives here, at the point of display.
+function goldParts(copper) {
+    return {
+        gold: Math.floor(copper / 10000),
+        silver: Math.floor((copper % 10000) / 100),
+        copper: copper % 100,
+    };
+}
+
+// Money the way the game writes it: each unit in its own coin colour, run
+// together as 12g34s56c. Leading zero units are dropped exactly as the
+// in-game money frame drops them, so 87 copper reads "87c", not "0g0s87c".
+//
+// NOTE: this returns HTML, so it belongs in innerHTML and never in an
+// attribute. exactGold() is the plain-text form for title tooltips.
 function formatGold(copper) {
     if (copper === null || copper === undefined) return "\u2014";
-    const gold = Math.floor(copper / 10000);
-    const silver = Math.floor((copper % 10000) / 100);
-    if (gold > 0) return `${gold.toLocaleString()}g`;
-    if (silver > 0) return `${silver}s`;
-    return `${copper % 100}c`;
+    const parts = goldParts(copper);
+    const out = [];
+    if (parts.gold > 0) {
+        out.push(`<span class="coin-g">${parts.gold.toLocaleString()}g</span>`);
+    }
+    if (parts.gold > 0 || parts.silver > 0) {
+        out.push(`<span class="coin-s">${parts.silver}s</span>`);
+    }
+    out.push(`<span class="coin-c">${parts.copper}c</span>`);
+    return out.join("");
 }
 
 function exactGold(copper) {
     if (copper === null || copper === undefined) return "No gold recorded yet";
-    const gold = Math.floor(copper / 10000);
-    const silver = Math.floor((copper % 10000) / 100);
-    return `${gold.toLocaleString()}g ${silver}s ${copper % 100}c`;
+    const parts = goldParts(copper);
+    return `${parts.gold.toLocaleString()}g ${parts.silver}s ${parts.copper}c`
+        + ` (${copper.toLocaleString()} copper)`;
 }
 
 // Playtime can run to days over a LAN weekend, so the unit shifts rather

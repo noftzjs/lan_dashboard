@@ -81,24 +81,26 @@
         .pbar i { display: block; height: 100%; background-color: var(--bar-color); border-radius: 3px; }
         .ppct { font-size: 10.5px; color: var(--text-dim); margin-top: 3px; font-variant-numeric: tabular-nums; }
         .zone { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .gold { color: #e8c37a; font-variant-numeric: tabular-nums; }
-        .played { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+        .gold { color: #e8c37a; font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .played { color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
         /* Tags live in their own column rather than under the name: stacked
            there, a tagged row ran a line taller than an untagged one and the
            table read as uneven. */
-        .tag-cell { text-align: right; }
+        /* Left-aligned so the chips sit directly under the Tags header. */
         .tag-cell .tag-row {
             display: flex;
-            justify-content: flex-end;
+            justify-content: flex-start;
             flex-wrap: nowrap;
-            gap: 5px;
+            gap: 4px;
             align-items: center;
         }
-        /* One line, always: a second chip would make this row taller than an
-           untagged one, which is the unevenness the column was meant to fix.
-           The overflow becomes a count, and the title carries the full list. */
-        .tag-cell .tag-chip { max-width: 110px; }
-        .tag-chip.more { opacity: 0.75; }
+        /* Every tag stays visible, but the chips shrink to share the column
+           and ellipsis whatever doesn't fit, so one very long tag reads as
+           "AHAHAHA…" instead of wrapping and making this row taller than its
+           neighbours. flex-shrink is proportional to content, so a long tag
+           gives up room before a short one does. The floor keeps the shortest
+           chip readable; three at the floor still fit the column. */
+        .tag-cell .tag-chip { flex: 0 1 auto; min-width: 42px; max-width: 100%; }
         .idle-row td { opacity: 0.62; }
 
         /* ---------------- Big screen ---------------- */
@@ -215,28 +217,35 @@
         <div class="ladder-wrap">
             <table class="ladder">
                 <colgroup>
+                    <!-- Zone is a fixed width, not a percentage: zone names have a
+                         known ceiling ("Stonetalon Mountains" is the longest that
+                         fits in a level-capped beta, measured at 138px including
+                         cell padding), so 140px fits every real one. As a
+                         percentage it was starved at narrow widths and wasted
+                         ~20px at wide ones. The slack goes to Tags, which is the
+                         column that actually benefits from more room. -->
                     <col style="width:38px">
-                    <col style="width:23%">
+                    <col style="width:19%">
+                    <col style="width:19%">
                     <col style="width:74px">
                     <col style="width:46px">
-                    <col style="width:20%">
-                    <col style="width:78px">
-                    <col style="width:88px">
                     <col style="width:15%">
-                    <col style="width:13%">
+                    <col style="width:112px">
+                    <col style="width:92px">
+                    <col style="width:140px">
                     <col style="width:76px">
                 </colgroup>
                 <thead>
                     <tr>
                         <th></th>
                         <th>Character</th>
+                        <th>Tags</th>
                         <th>Faction</th>
                         <th class="num">Lvl</th>
                         <th>Progress</th>
-                        <th class="num">Gold</th>
-                        <th class="num">Played</th>
+                        <th>Gold</th>
+                        <th>Played</th>
                         <th>Zone</th>
-                        <th class="tag-cell">Tags</th>
                         <th class="num">Last sync</th>
                     </tr>
                 </thead>
@@ -311,15 +320,16 @@
         return ranked && rank <= 3 ? ` r${rank}` : "";
     }
 
-    // First tag as a chip, the rest as a count, so the row never grows a
-    // second line. Everything stays reachable through the tooltip.
+    // Every tag gets a chip -- no "+N" rollup. The row can't grow taller
+    // regardless: the CSS keeps them on one line and ellipsises an over-long
+    // tag, so each chip carries its own full value as a tooltip.
     function tagCell(player) {
         const tags = player.tags || [];
         if (!tags.length) return "";
-        const [first, ...rest] = tags;
-        const all = escapeHtml(tags.join(", "));
-        const extra = rest.length ? `<span class="tag-chip more" title="${all}">+${rest.length}</span>` : "";
-        return `<div class="tag-row" title="${all}"><span class="tag-chip">${escapeHtml(first)}</span>${extra}</div>`;
+        const chips = tags
+            .map(tag => `<span class="tag-chip" title="${escapeHtml(tag)}">${escapeHtml(tag)}</span>`)
+            .join("");
+        return `<div class="tag-row" title="${escapeHtml(tags.join(", "))}">${chips}</div>`;
     }
 
     function buildLadderRow(player, rank, ranked) {
@@ -339,16 +349,16 @@
                     <div class="cname" style="color:${classColor}">${escapeHtml(player.name)}${streamBadgesHtml(player)}</div>
                     <div class="csub">${sub || "No profile yet"}</div>
                 </td>
+                <td class="tag-cell">${tagCell(player)}</td>
                 <td class="${factionClass}">${escapeHtml(player.faction || "—")}</td>
                 <td class="num lvl">${player.level}</td>
                 <td>
                     <div class="pbar"><i style="width:${player.pct}%"></i></div>
                     <div class="ppct">${progressText(player)}</div>
                 </td>
-                <td class="num gold" title="${escapeHtml(exactGold(player.gold))}">${formatGold(player.gold)}</td>
-                <td class="num played" title="${player.played_level ? escapeHtml(formatPlayed(player.played_level)) + " at this level" : "No playtime recorded yet"}">${formatPlayed(player.played_total)}</td>
+                <td class="gold" title="${escapeHtml(exactGold(player.gold))}">${formatGold(player.gold)}</td>
+                <td class="played" title="${player.played_level ? escapeHtml(formatPlayed(player.played_level)) + " at this level" : "No playtime recorded yet"}">${formatPlayed(player.played_total)}</td>
                 <td class="zone" title="${escapeHtml(player.current_zone || "")}">${escapeHtml(player.current_zone || "—")}</td>
-                <td class="tag-cell">${tagCell(player)}</td>
                 <td class="num csub">${lastSyncLabel(player)}</td>
             </tr>`;
     }
