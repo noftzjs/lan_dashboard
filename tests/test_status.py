@@ -138,6 +138,28 @@ def test_status_survives_a_restart(build_server):
     assert restored["played_total"] == 12345
 
 
+def test_analytics_reports_gold_and_playtime(server):
+    """The roster table on /analytics reads these straight off the payload,
+    so they have to be in it -- they were briefly missing and the column
+    rendered an em dash for every character."""
+    from conftest import ROSTER_AUTH
+    accepted(server, status(gold=987654, played_total=144000, played_level=7200))
+    data = server.get("/api/analytics", auth=ROSTER_AUTH).json()
+    player = next(p for p in data["players"] if p["name"] == "Ayla")
+    assert player["gold"] == 987654
+    assert player["played_total"] == 144000
+    assert player["played_level"] == 7200
+
+
+def test_analytics_reports_absent_gold_as_none(server):
+    accepted(server, f"NoStatus,XP,{STAMP},10,100,1000")
+    from conftest import ROSTER_AUTH
+    data = server.get("/api/analytics", auth=ROSTER_AUTH).json()
+    player = next(p for p in data["players"] if p["name"] == "NoStatus")
+    assert player["gold"] is None
+    assert player["played_total"] is None
+
+
 def test_status_counts_as_activity(server):
     """A capped character with nothing else to report still has to look alive
     rather than drifting into the idle filter."""

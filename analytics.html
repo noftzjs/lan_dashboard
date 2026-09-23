@@ -60,7 +60,7 @@
         /* Tables are the one thing allowed to be wider than the panel; they
            scroll inside their own box so the page itself never does. */
         .table-scroll { overflow-x: auto; }
-        table.data { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 460px; }
+        table.data { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 620px; }
         table.data th, table.data td { text-align: left; padding: 7px 10px 7px 0; border-bottom: 1px solid var(--border-color); }
         table.data th { color: var(--text-muted); font-weight: 500; font-size: 12px; cursor: default; }
         table.data td.num, table.data th.num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -339,7 +339,8 @@
             <thead><tr>
                 <th>Character</th><th>Class</th><th>Faction</th>
                 <th class="num">Level</th><th class="num">Progress</th>
-                <th class="num">Quests</th><th class="num">Deaths</th><th>Zone</th><th>Status</th>
+                <th class="num">Quests</th><th class="num">Deaths</th>
+                <th class="num">Gold</th><th class="num">Played</th><th>Zone</th><th>Status</th>
             </tr></thead>
             <tbody>${players.map(p => {
                 const idle = p.idle_seconds === null || p.idle_seconds > staleAfter;
@@ -351,6 +352,8 @@
                     <td class="num">${p.max_xp === 0 ? "MAX" : p.pct + "%"}</td>
                     <td class="num">${fmt(p.quests)}</td>
                     <td class="num">${fmt(p.deaths)}</td>
+                    <td class="num" title="${escapeHtml(exactGold(p.gold))}">${formatGold(p.gold)}</td>
+                    <td class="num">${formatPlayed(p.played_total)}</td>
                     <td>${escapeHtml(p.zone || "—")}</td>
                     <td>${idle ? "Idle" : "Active"}</td>
                 </tr>`;

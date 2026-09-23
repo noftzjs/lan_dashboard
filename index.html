@@ -33,7 +33,18 @@
 
         /* ---------------- Ladder ---------------- */
         .ladder-wrap { overflow-x: auto; border: 1px solid var(--border-color); border-radius: 8px; }
-        table.ladder { width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 760px; }
+        /* table-layout: fixed so the columns are what the colgroup says they
+           are. With auto layout the browser hands leftover width to whichever
+           columns it likes, which is what left a lake of empty space around
+           Faction while Progress stayed cramped. */
+        table.ladder {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12.5px;
+            min-width: 1040px;
+            table-layout: fixed;
+        }
+        table.ladder td, table.ladder th { overflow: hidden; text-overflow: ellipsis; }
         table.ladder th {
             text-align: left;
             font-weight: 500;
@@ -58,15 +69,36 @@
         .rk.r1 { color: #ffd166; }
         .rk.r2 { color: #c9ccd4; }
         .rk.r3 { color: #cd7f32; }
-        .cname { font-weight: 600; white-space: nowrap; display: flex; align-items: center; gap: 7px; }
+        /* Fixed line box so a row with stream badges is exactly as tall as
+           one without -- the badges are taller than the text otherwise, and
+           that row alone sat a few pixels proud of the rest. */
+        .cname { font-weight: 600; white-space: nowrap; display: flex; align-items: center; gap: 7px; line-height: 18px; }
+        .cname .stream-badge { width: 16px; height: 16px; }
         .csub { font-size: 10.5px; color: var(--text-dim); white-space: nowrap; }
         .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
         .lvl { font-weight: 700; font-variant-numeric: tabular-nums; }
         .pbar { height: 5px; background-color: #24242c; border-radius: 3px; overflow: hidden; min-width: 80px; }
         .pbar i { display: block; height: 100%; background-color: var(--bar-color); border-radius: 3px; }
         .ppct { font-size: 10.5px; color: var(--text-dim); margin-top: 3px; font-variant-numeric: tabular-nums; }
-        .zone { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
-        .col-progress { width: 20%; }
+        .zone { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .gold { color: #e8c37a; font-variant-numeric: tabular-nums; }
+        .played { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+        /* Tags live in their own column rather than under the name: stacked
+           there, a tagged row ran a line taller than an untagged one and the
+           table read as uneven. */
+        .tag-cell { text-align: right; }
+        .tag-cell .tag-row {
+            display: flex;
+            justify-content: flex-end;
+            flex-wrap: nowrap;
+            gap: 5px;
+            align-items: center;
+        }
+        /* One line, always: a second chip would make this row taller than an
+           untagged one, which is the unevenness the column was meant to fix.
+           The overflow becomes a count, and the title carries the full list. */
+        .tag-cell .tag-chip { max-width: 110px; }
+        .tag-chip.more { opacity: 0.75; }
         .idle-row td { opacity: 0.62; }
 
         /* ---------------- Big screen ---------------- */
@@ -102,6 +134,12 @@
             background-color: var(--card-color);
         }
         .big-row .rank { font-size: 17px; font-weight: 800; color: var(--text-dim); width: 28px; font-variant-numeric: tabular-nums; flex: none; }
+        /* Fixed basis so every XP bar begins at the same x. Left to size
+           itself, this block grew with the name and dragged the bar with it,
+           so the column of bars came out ragged. min-width:0 lets a long name
+           ellipsis instead of pushing the bar right anyway. */
+        .big-row .who-block { flex: 0 0 260px; min-width: 0; }
+        .big-row .who-block .name, .big-row .who-block .meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .big-row .name { font-size: 19px; font-weight: 700; display: flex; align-items: center; gap: 8px; overflow-wrap: anywhere; }
         .big-row .meta { font-size: 12px; color: var(--text-muted); }
         .big-row .lvl { font-size: 24px; font-weight: 800; margin-left: auto; font-variant-numeric: tabular-nums; }
@@ -176,14 +214,29 @@
         <div class="eyebrow" style="margin-bottom:8px">Progression ladder <span class="sub" id="ladderSub"></span></div>
         <div class="ladder-wrap">
             <table class="ladder">
+                <colgroup>
+                    <col style="width:38px">
+                    <col style="width:23%">
+                    <col style="width:74px">
+                    <col style="width:46px">
+                    <col style="width:20%">
+                    <col style="width:78px">
+                    <col style="width:88px">
+                    <col style="width:15%">
+                    <col style="width:13%">
+                    <col style="width:76px">
+                </colgroup>
                 <thead>
                     <tr>
                         <th></th>
                         <th>Character</th>
                         <th>Faction</th>
                         <th class="num">Lvl</th>
-                        <th class="col-progress">Progress</th>
+                        <th>Progress</th>
+                        <th class="num">Gold</th>
+                        <th class="num">Played</th>
                         <th>Zone</th>
+                        <th class="tag-cell">Tags</th>
                         <th class="num">Last sync</th>
                     </tr>
                 </thead>
@@ -258,6 +311,17 @@
         return ranked && rank <= 3 ? ` r${rank}` : "";
     }
 
+    // First tag as a chip, the rest as a count, so the row never grows a
+    // second line. Everything stays reachable through the tooltip.
+    function tagCell(player) {
+        const tags = player.tags || [];
+        if (!tags.length) return "";
+        const [first, ...rest] = tags;
+        const all = escapeHtml(tags.join(", "));
+        const extra = rest.length ? `<span class="tag-chip more" title="${all}">+${rest.length}</span>` : "";
+        return `<div class="tag-row" title="${all}"><span class="tag-chip">${escapeHtml(first)}</span>${extra}</div>`;
+    }
+
     function buildLadderRow(player, rank, ranked) {
         const classColor = CLASS_COLORS[player.class] || "var(--text-color)";
         const factionClass = player.faction === "Alliance" ? "faction-alliance"
@@ -268,14 +332,12 @@
             player.class ? `<span style="color:${classColor}">${escapeHtml(player.class)}</span>` : "",
             player.guild ? `&lt;${escapeHtml(player.guild)}&gt;` : "",
         ].filter(Boolean).join(" · ");
-        const tags = tagChipsHtml(player);
         return `
             <tr id="${playerElementId("row", player.name)}" class="${isStale(player) ? "idle-row" : ""}">
                 <td class="rk${rankClass(rank, ranked)}">${rank}</td>
                 <td>
                     <div class="cname" style="color:${classColor}">${escapeHtml(player.name)}${streamBadgesHtml(player)}</div>
                     <div class="csub">${sub || "No profile yet"}</div>
-                    ${tags ? `<div class="tag-row" style="margin-top:4px">${tags}</div>` : ""}
                 </td>
                 <td class="${factionClass}">${escapeHtml(player.faction || "—")}</td>
                 <td class="num lvl">${player.level}</td>
@@ -283,7 +345,10 @@
                     <div class="pbar"><i style="width:${player.pct}%"></i></div>
                     <div class="ppct">${progressText(player)}</div>
                 </td>
+                <td class="num gold" title="${escapeHtml(exactGold(player.gold))}">${formatGold(player.gold)}</td>
+                <td class="num played" title="${player.played_level ? escapeHtml(formatPlayed(player.played_level)) + " at this level" : "No playtime recorded yet"}">${formatPlayed(player.played_total)}</td>
                 <td class="zone" title="${escapeHtml(player.current_zone || "")}">${escapeHtml(player.current_zone || "—")}</td>
+                <td class="tag-cell">${tagCell(player)}</td>
                 <td class="num csub">${lastSyncLabel(player)}</td>
             </tr>`;
     }
@@ -297,6 +362,8 @@
             player.faction ? `<span class="${factionClass}">${escapeHtml(player.faction)}</span>` : "",
             player.guild ? escapeHtml(player.guild) : "",
             player.current_zone ? escapeHtml(player.current_zone) : "",
+            player.gold != null ? `<span class="gold">${formatGold(player.gold)}</span>` : "",
+            player.played_total ? `${formatPlayed(player.played_total)} played` : "",
         ].filter(Boolean).join(" · ");
         const heroTags = tagChipsHtml(player);
         return `
@@ -323,12 +390,14 @@
             player.class ? `<span style="color:${classColor}">${escapeHtml(player.class)}</span>` : "",
             player.faction ? `<span class="${factionClass}">${escapeHtml(player.faction)}</span>` : "",
             player.current_zone ? escapeHtml(player.current_zone) : "",
+            player.gold != null ? `<span class="gold">${formatGold(player.gold)}</span>` : "",
+            player.played_total ? formatPlayed(player.played_total) : "",
         ].filter(Boolean).join(" · ");
         const rowTags = tagChipsHtml(player);
         return `
             <div class="big-row ${isStale(player) ? "idle-row" : ""}" id="${playerElementId("big", player.name)}">
                 <span class="rank">${rank}</span>
-                <div>
+                <div class="who-block">
                     <div class="name" style="color:${classColor}">${escapeHtml(player.name)}${streamBadgesHtml(player)}</div>
                     <div class="meta">${meta || "No profile yet"}</div>
                     ${rowTags ? `<div class="tag-row" style="margin-top:6px">${rowTags}</div>` : ""}
@@ -419,7 +488,7 @@
                 ranked ? "Live · sorted by level" : "Live · sorted by name";
             const body = document.getElementById("ladderBody");
             if (!players.length) {
-                body.innerHTML = `<tr><td colspan="7" class="empty-state">${emptyMessage}</td></tr>`;
+                body.innerHTML = `<tr><td colspan="10" class="empty-state">${emptyMessage}</td></tr>`;
                 return;
             }
             morphChildren(body, players.map((p, i) => buildLadderRow(p, i + 1, ranked)).join(""));

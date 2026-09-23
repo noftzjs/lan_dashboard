@@ -926,6 +926,9 @@ async def get_analytics(_user: str = Depends(require_roster_auth)):
             "level": state.get("level", 1),
             "pct": state.get("pct", 0),
             "max_xp": state.get("max_xp", 1),   # 0 means the character is at the level cap
+            "gold": state.get("gold"),           # copper; None until a STATUS arrives
+            "played_total": state.get("played_total"),
+            "played_level": state.get("played_level"),
             "zone": state.get("current_zone"),
             "idle_seconds": idle_seconds(state),
             "quests": quest_count.get(name, 0),

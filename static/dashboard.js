@@ -191,6 +191,39 @@ function progressText(player) {
     return `${player.pct}% · ${player.current_xp.toLocaleString()} / ${player.max_xp.toLocaleString()}`;
 }
 
+// Copper is what the game counts in and what the server stores, so the
+// conversion to g/s/c lives here, at the point of display. Only the largest
+// meaningful unit is shown to keep a table column narrow; the exact amount
+// goes in the title attribute.
+function formatGold(copper) {
+    if (copper === null || copper === undefined) return "\u2014";
+    const gold = Math.floor(copper / 10000);
+    const silver = Math.floor((copper % 10000) / 100);
+    if (gold > 0) return `${gold.toLocaleString()}g`;
+    if (silver > 0) return `${silver}s`;
+    return `${copper % 100}c`;
+}
+
+function exactGold(copper) {
+    if (copper === null || copper === undefined) return "No gold recorded yet";
+    const gold = Math.floor(copper / 10000);
+    const silver = Math.floor((copper % 10000) / 100);
+    return `${gold.toLocaleString()}g ${silver}s ${copper % 100}c`;
+}
+
+// Playtime can run to days over a LAN weekend, so the unit shifts rather
+// than printing an unreadable hour count.
+function formatPlayed(seconds) {
+    if (!seconds) return "\u2014";
+    const hours = Math.floor(seconds / 3600);
+    if (hours < 1) return `${Math.floor(seconds / 60)}m`;
+    if (hours < 24) {
+        const minutes = Math.floor((seconds % 3600) / 60);
+        return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
+    }
+    return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+
 // Live updates arrive continuously (a websocket message per game event).
 // Rebuilding a list with container.innerHTML = html destroys and recreates
 // every element on every update, which is what caused the focus-loss and
