@@ -20,6 +20,10 @@ LanFrame:RegisterEvent("TIME_PLAYED_MSG")       -- The reply to RequestTimePlaye
 -- unavailable; quest and level-up weights carry the reload-trigger system.
 LanFrame:RegisterEvent("PLAYER_CONTROL_LOST")   -- Fires when a flight path departs — a safe reload window
 LanFrame:RegisterEvent("PLAYER_FLAGS_CHANGED")  -- Fires on AFK toggle — another safe reload window
+-- Closes an open AFK interval on the way out. pcall'd rather than registered
+-- outright: this beta has already removed one event from addon access, and a
+-- failed registration at load would take the whole addon down with it.
+pcall(function() LanFrame:RegisterEvent("PLAYER_LOGOUT") end)
 
 -- Internal memory to check if data changed before spamming the chat log
 local currentZone = ""
@@ -187,6 +191,89 @@ local LDB_playedTotal, LDB_playedLevel = 0, 0   -- seconds, from TIME_PLAYED_MSG
 local LDB_awaitingPlayed = false                -- a reply we asked for is in flight
 local LDB_statusPending = false                 -- ...and a STATUS is waiting on it
 
+--============================================================
+-- AFK TIME, PROFESSIONS, ITEM LEVEL
+--============================================================
+-- All three ride along on STATUS rather than getting their own log type. That
+-- is a deployment decision, not a style one: an older watcher does not skip an
+-- unknown log type harmlessly -- it treats the line as malformed, advances
+-- sent_count past it, and the event is gone. Extra fields on an existing type
+-- are forwarded by every watcher and ignored by every older server.
+
+-- Time spent flagged AFK. Accumulated here because the game does not report
+-- it: /played counts time logged in, not time idle.
+--
+-- Unlike /played, which the realm server vouches for, this number is ours. It
+-- only counts time since the addon was installed and it resets if
+-- SavedVariables is wiped, which is why the dashboard labels it as an
+-- estimate rather than implying the game agrees.
+local afkSince = nil   -- Session-local on purpose: a crash mid-AFK loses the
+                       -- open interval, which is better than persisting a
+                       -- start time that may never be closed and would later
+                       -- read as days of idling.
+
+local function afkTotalFor(playerName)
+    return (LanDashboardDB.afk and LanDashboardDB.afk[playerName]) or 0
+end
+
+-- Closes an open AFK interval and banks it. Safe to call when none is open.
+local function afkAccumulate(playerName)
+    if not afkSince or not playerName then return end
+    local elapsed = eventTime() - afkSince
+    afkSince = nil
+    if elapsed <= 0 then return end
+    LanDashboardDB.afk = LanDashboardDB.afk or {}
+    LanDashboardDB.afk[playerName] = afkTotalFor(playerName) + elapsed
+end
+
+-- A field the player has asked not to share. Sent as an empty slot rather than
+-- omitted, because STATUS is positional and dropping a field would shift every
+-- field after it.
+local function isPrivate(field)
+    return (LanDashboardDB.private and LanDashboardDB.private[field]) and true or false
+end
+
+-- Slots 1-2 are the primaries and 3-5 the secondaries on this client (measured
+-- with /ldb probe, 2026-09-24 -- First Aid sits where retail puts archaeology).
+-- The slot number and the spellbook index are different numbers and do not
+-- correlate here, so the returned index is what gets passed on, never the slot.
+local function professionFields()
+    if type(GetProfessions) ~= "function" or type(GetProfessionInfo) ~= "function" then
+        return nil
+    end
+    local ok, a, b, c, d, e = pcall(GetProfessions)
+    if not ok then return nil end
+    local indices = { a, b, c, d, e }
+    local fields = {}
+    for slot = 1, 5 do
+        local index = indices[slot]
+        if index then
+            local okInfo, name, _, rank, maxRank = pcall(GetProfessionInfo, index)
+            if okInfo and type(name) == "string" and tonumber(rank) and tonumber(maxRank) then
+                -- Commas and colons are this payload's own separators. A name
+                -- carrying one would make the line unparseable, the server
+                -- would reject it, and the event would be destroyed -- the
+                -- watcher's sent_count has already moved past it by then. No
+                -- real profession name contains either; this is here so a
+                -- localised or renamed one cannot cost a player their data.
+                name = name:gsub("[,:]", " ")
+                fields[#fields + 1] = string.format("%s:%d:%d", name, rank, maxRank)
+            end
+        end
+    end
+    return fields
+end
+
+-- Retail returns overall, equipped, pvp, and this client matches that shape.
+-- Equipped is the honest number for a dashboard: overall counts upgrades being
+-- carried but not worn, which would flatter a player hoarding them.
+local function equippedItemLevel()
+    if type(GetAverageItemLevel) ~= "function" then return nil end
+    local ok, overall, equipped = pcall(GetAverageItemLevel)
+    if not ok then return nil end
+    return tonumber(equipped) or tonumber(overall)
+end
+
 local function sendStatus(playerName)
     local level = UnitLevel("player") or 1
     local currentXP = UnitXP("player") or 0
@@ -197,8 +284,38 @@ local function sendStatus(playerName)
     -- Copper, the unit the game counts in. Converting to gold is the
     -- dashboard's job, so no precision is thrown away here.
     local money = (GetMoney and GetMoney()) or 0
-    emit(playerName, "STATUS", string.format("%d,%d,%d,%d,%d,%d",
-        level, currentXP, maxXP, money, LDB_playedTotal, LDB_playedLevel))
+    -- An empty slot means "the player declined to share this". The server maps
+    -- it to a withheld field rather than to zero -- which matters, because a
+    -- character genuinely can be broke.
+    local goldField = isPrivate("gold") and "" or string.format("%d", money)
+
+    local head = string.format("%d,%d,%d,%s,%d,%d",
+        level, currentXP, maxXP, goldField, LDB_playedTotal, LDB_playedLevel)
+
+    local professions = professionFields()
+    local itemLevel = equippedItemLevel()
+    if professions == nil and itemLevel == nil then
+        -- Nothing in the tail is obtainable on this client, so send the plain
+        -- six-field form. An older server would have ignored the tail anyway,
+        -- but this keeps the payload honest rather than padding it with empty
+        -- slots that would read as deliberate refusals.
+        emit(playerName, "STATUS", head)
+        return
+    end
+
+    local itemLevelField = ""
+    if itemLevel and not isPrivate("item_level") then
+        itemLevelField = string.format("%.2f", itemLevel)
+    end
+    local afkField = isPrivate("afk_total") and "" or
+        string.format("%d", afkTotalFor(playerName))
+
+    -- The trailing comma is load-bearing: it makes the profession list present
+    -- but empty, which the server reads as "this character has none". Without
+    -- it the field is absent, and absent means "an older addon that cannot
+    -- report professions" -- so the server would keep stale ones instead.
+    emit(playerName, "STATUS", string.format("%s,%s,%s,%s",
+        head, itemLevelField, afkField, table.concat(professions or {}, ",")))
 end
 
 -- Time played is only knowable by asking the server and waiting for the
@@ -379,8 +496,19 @@ LanFrame:SetScript("OnEvent", function(self, event, ...)
 
     elseif event == "PLAYER_FLAGS_CHANGED" then
         if UnitIsAFK("player") then
+            -- Opening edge. Guarded because this event also fires for flag
+            -- changes that have nothing to do with AFK, and restarting the
+            -- clock on each would undercount a long idle.
+            if not afkSince then afkSince = eventTime() end
             tryFlush("afk")
+        else
+            afkAccumulate(UnitName("player"))
         end
+
+    elseif event == "PLAYER_LOGOUT" then
+        -- Bank an interval that is still open, so a session ending while AFK
+        -- still counts. SavedVariables is written after this fires.
+        afkAccumulate(UnitName("player"))
     end
 end)
 
@@ -641,7 +769,7 @@ local function reportSection(label, found, err)
 end
 
 local function runProbe()
-    local report = { addon = "3.2.0" }
+    local report = { addon = "3.3.0" }
     report.when = (date and date("%Y-%m-%d %H:%M:%S")) or tostring(time and time() or "?")
 
     local okBuild, version, build, buildDate, tocVersion = pcall(GetBuildInfo)
@@ -730,6 +858,31 @@ SlashCmdList["LANDASHBOARD"] = function(msg)
         print(string.format("|cffe8a33d[LAN Dashboard] Event echo %s.|r", LDB_VERBOSE and "ON — every recorded event will print here" or "off"))
         return
     end
+    local privateField = msg:match("^private%s+(%S+)$")
+    if privateField then
+        local allowed = { gold = true, item_level = true, afk_total = true }
+        if not allowed[privateField] then
+            print("|cffe8a33d[LAN Dashboard] Can't hide '" .. privateField ..
+                  "'. Try: gold, item_level, afk_total.|r")
+            return
+        end
+        LanDashboardDB.private = LanDashboardDB.private or {}
+        LanDashboardDB.private[privateField] = not LanDashboardDB.private[privateField]
+        local hidden = LanDashboardDB.private[privateField]
+        print(string.format(
+            "|cffe8a33d[LAN Dashboard] %s is now %s. It updates on your next sync.|r",
+            privateField, hidden and "HIDDEN from the dashboard" or "shared again"))
+        return
+    end
+    if msg == "private" then
+        local shown = {}
+        for _, field in ipairs({ "gold", "item_level", "afk_total" }) do
+            shown[#shown + 1] = field .. "=" .. (isPrivate(field) and "hidden" or "shared")
+        end
+        print("|cffe8a33d[LAN Dashboard] " .. table.concat(shown, "  ") ..
+              "  |  /ldb private gold to toggle.|r")
+        return
+    end
     if msg == "probe" then
         runProbe()
         return
@@ -746,4 +899,4 @@ SlashCmdList["LANDASHBOARD"] = function(msg)
     ))
 end
 
-print("|cffcd7f32LAN Dashboard v3.2.0 Initialized! Type /ldb to check reload-trigger status, /ldb sync to test the sync button, /ldb probe to report what this client's API exposes.|r")
+print("|cffcd7f32LAN Dashboard v3.3.0 Initialized! Type /ldb to check reload-trigger status, /ldb sync to test the sync button, /ldb probe to report what this client's API exposes.|r")
