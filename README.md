@@ -87,12 +87,45 @@ Reported from real play on the restyled dashboard. Diagnoses noted where already
 - [x] **Tags sit beside the character name and no longer collapse to `+N`.** All of a character's tags render; see the uniform-row-height item above for the mechanism.
 - [x] **Zone is a fixed 140px, not a percentage.** Zone names have a known ceiling, so scaling them with the window was wrong in both directions: at the table's 1040px `min-width` floor the column fell to 122px and clipped `Stonetalon Mountains`, while at a wide viewport it inflated to ~161px of mostly empty space. Widths were measured by rendering the longest Classic zone names in the cell's own computed font rather than estimated &mdash; `Stonetalon Mountains` needs 138px including padding, and 140px covers every outdoor zone. The reclaimed percentage went to Tags (17% -> 19%), which is what let a three-tag row stop truncating. An instance name (`The Temple of Atal'Hakkar`, 161px) would still ellipsise, with the full name on the cell tooltip.
 
-### Logged 2026-09-23 &mdash; Big screen: played time truncated
+### Logged 2026-09-23 &mdash; Big screen: meta line truncated (gold and played time)
 - [ ] **The meta line is cut short, usually losing played time.** Reported from the live Big screen, where a pack row read `WARRIOR &middot; Alliance &middot; Duskwood &middot; 1g78s10c &middot; 13...`. **Cause:** `.big-row .who-block` is `flex: 0 0 260px` (`index.html:143`) with `text-overflow: ellipsis` on the line, and playtime is last in the meta, so it's first to go. Measured rather than estimated: the worst case the schema allows (`WARLOCK &middot; Alliance &middot; Stonetalon Mountains &middot; 2,345g67s89c &middot; 2d 10h`) needs **358px against the 260px it gets &mdash; cut by 98px**. The 260px was chosen before gold and played time were added to that line; it fit when the line was three items, not five.
+
+  **Confirmed again 2026-09-24 by testers**, and worse than first logged: with more real characters on the board it is now eating *gold* as well as played time. Three of four pack rows were cut (`Stormwind City - 1g99s55...`, `1g16s28c - 1...`, `1g39s26c - ...`), and only the row with the shortest zone and smallest gold value survived intact. Raised in beta feedback, so it is player-visible, not just untidy.
 
   **The space is free.** `.barwrap` beside it is `flex: 1 1 200px; min-width: 150px` and measured 371px even in a cramped 445px-wide row &mdash; on an actual projector it's ~800px. An XP bar does not need 800px to communicate 54.7%.
 
   **Fix, with one subtlety:** raise the basis to ~360px, but make it `flex: 0 1 360px` rather than `0 0 360px`. A non-shrinking 360px block plus the bar's 150px floor overflows a phone-width row; allowing shrink lets it give the space back when there isn't any, with the ellipsis still there as the last resort. This does **not** reintroduce the ragged-bar problem that the fixed basis was added to solve &mdash; flex shrink is proportional to basis, and every row's who-block has the same basis, so they all resolve to the same width and the bars still start at a common x. Worth re-checking the bar alignment after the change anyway, since that's the property being traded against.
+
+### Logged 2026-09-24 &mdash; beta tester feedback
+Raised by real testers after the first proper influx. Ordered smallest to largest.
+
+- [ ] **Let players opt out of sharing a field, starting with gold.** Someone does not want their gold on a public board, which is fair &mdash; and the dashboard is public by design. Build it as a general opt-out set rather than a gold-specific flag, since more fields will want this (`LanDashboardDB.private = { gold = true }`, toggled with something like `/ldb private gold`). Account-wide is the right default; gold is per-character but "do not share my gold" is a per-*person* wish.
+
+  **The encoding is the hard part, and it is a deploy hazard.** `STATUS` is positional (`level,current_xp,max_xp,gold,played_total,played_level`), so a field cannot simply be dropped without shifting everything after it. Both obvious encodings are rejected by the *current* server, and rejection here is not harmless &mdash; a refused event advances `sent_count` and is **destroyed permanently**:
+  - an empty field (`...,max_xp,,played_total,...`) hits `int("")` at `main.py:488` and raises;
+  - a `-1` sentinel passes `int()` but fails `0 <= gold <= GOLD_MAX_COPPER` at `main.py:497`.
+
+  Note `0` cannot be the sentinel either: unlike `played_total`, where `0` already means "no answer yet" (`main.py:511`), a character genuinely can be broke.
+
+  **So do it in two deploys, and do the first one now.** Ship a server that maps an empty gold field to NULL *before* the addon can ever emit one. That change is inert on its own &mdash; no addon sends an empty field yet &mdash; and once it is live the addon half can ship whenever, in either order, with no window where honest data gets shredded. Trying to do both at once is what loses events.
+
+  **UI:** withheld is not the same as missing. The dashboard currently shows an em dash for "no data yet"; a deliberately private field should read differently (a lock glyph, or "private") so nobody reads a hidden value as a broken watcher.
+
+- [ ] **Track professions.** A natural fit for the roster and analytics pages, and a real part of the levelling story.
+
+  **API:** on Classic-lineage clients professions come from the skill list (`GetNumSkillLines()` / `GetSkillLineInfo(i)`) rather than retail's `GetProfessions()`. The filtering is the fiddly part: that list also carries weapon skills, languages, defense and riding, so entries have to be taken from under the *Professions* and *Secondary Skills* headers rather than matched against a hardcoded name list. Each gives name, rank and max rank &mdash; `Blacksmithing 185/225`. Verify which of these the Midnight beta still exposes before building on it; this beta has already removed one API out from under us.
+
+  **Carry it on `STATUS` as a variable-length tail, not a new log type.** Same reasoning as the AFK item, and it matters more here because professions are variable in number (0-2 primaries plus secondaries). Appending `Blacksmithing:185:225,Cooking:120:300` after `played_level` keeps the watcher happy (it tests `len(parts) >= 8`, and more fields still pass) and an older server ignores the tail because it slices `parts[:6]`. A new `PROFESSION` log type would instead be destroyed outright by any watcher that predates it. Storage wants a JSON `professions` column on `player_snapshots` plus a migration.
+
+  **Cadence:** `SKILL_LINES_CHANGED` fires for weapon skills too, so it is noisy; emitting on the existing `STATUS` cadence (login and level-up) is enough for a dashboard and adds no new queue pressure.
+
+- [ ] **Damage done &mdash; only possible via the watcher, and it is a much bigger job than it sounds.** A tester asked for it. The instinct to offload it to the watcher is not merely an optimisation &mdash; **it is the only route that exists**, and that is already established in this project: `COMBAT_LOG_EVENT_UNFILTERED` was removed from addon access on this beta (interface 16001+), so the addon cannot see combat data at all. The separate `WoWCombatLog.txt` file was confirmed still fully populated on the same client, which is why the watcher is the only thing that can do this.
+
+  **What the earlier investigation already found about that file**, all of which lands on this feature: it is not on unless `/combatlog` is run each session (the addon calling `LoggingCombat(true)` would fix that &mdash; verify it survived the same API cull); it logs every player in range, which on a public beta is dozens of strangers; and it identifies the local player only through `0x511` source flags once they act in combat. That last point has a neat answer here &mdash; the watcher already knows which characters belong to this player from `SavedVariables`, so it can match by name rather than decoding flags.
+
+  **Scope honestly.** This is a second ingestion pipeline (incremental file tailing, combat-log parsing, local aggregation), not an increment on the existing one, and combat logs grow by megabytes an hour. Sending aggregates rather than events is right. The watcher already tails incrementally for `SavedVariables`, so the pattern exists to copy.
+
+  **Worth a product decision before any of that:** this is a levelling race to 20, and damage done is a raid-meter stat. It may not tell the story the dashboard is for &mdash; deaths, pace and time played probably say more about a levelling journey than DPS does. Cheap to defer, expensive to build.
 
 ### Logged 2026-09-23 &mdash; load testing the live server
 - [ ] **Prove the self-hosted box survives a full LAN before the LAN, not during it.** Launch is 2026-11-04 and the setup has never seen more than a handful of real clients.
