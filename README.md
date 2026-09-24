@@ -165,6 +165,8 @@ Measured with `/ldb probe` (addon v3.2.0) on `1.60.1 build 69977, toc 16001`. Re
 
   **Freeze it.** The single most important design point: a report that recomputes on every load is not a record of the LAN, it is a live page that will disagree with the screenshot someone took. Generate it once against a time range, store the result, and serve the stored copy. That also settles what happens when a character keeps playing afterwards.
 
+  **Scope note (operator, 2026-09-24):** at the launch LAN essentially everyone rolls a fresh character and starts from level 1 at about the same time. That collapses most of the difficulty below &mdash; totals become directly comparable, and the game's lifetime quest figure *is* the LAN figure when the character did not exist beforehand. The traps are kept because they still bite in the cases that remain: an alt rolled mid-event, someone arriving late or leaving early, and the beta data as it stands today (one character reads 109 lifetime against 45 seen). Worth re-reading them when the report is built rather than designing around them now.
+
   **Four fairness traps, all of which would produce a wrong winner:**
   - **Gold is opt-in**, so a "richest" award silently ranks only the people who chose to share. Either drop that award or label it *among those sharing* &mdash; never present a partial field as a full ranking.
   - **Late joiners lose every total.** Someone who rolled an alt on day two cannot win "most quests" on volume. Pair each total with a rate (per hour played) so both kinds of achievement are visible.
