@@ -769,7 +769,7 @@ local function reportSection(label, found, err)
 end
 
 local function runProbe()
-    local report = { addon = "3.3.0" }
+    local report = { addon = "3.4.0" }
     report.when = (date and date("%Y-%m-%d %H:%M:%S")) or tostring(time and time() or "?")
 
     local okBuild, version, build, buildDate, tocVersion = pcall(GetBuildInfo)
@@ -846,8 +846,198 @@ local function runProbe()
     print("|cffe8a33d  Saved to LanDashboardDB.probe -- type /reload, then send me the probe block from SavedVariables.|r")
 end
 
+--============================================================
+-- SETTINGS PANEL
+--============================================================
+-- A slash command nobody remembers is not really a setting, and a toggle whose
+-- state you cannot see is worse -- a player who forgets whether they hid their
+-- gold has no way to check short of watching the dashboard. Everything
+-- adjustable lives here instead, with its current state on screen.
+--
+-- Built from plain frames and coloured textures rather than SetBackdrop: that
+-- moved behind a mixin template in later clients and this one is a revamp of
+-- uncertain lineage. Only two templates are used and both are already proven
+-- in this addon, since the sync button uses them.
+
+local configFrame
+
+local PRIVACY_OPTIONS = {
+    { field = "gold", label = "Share my gold",
+      hint = "Your total, shown on the dashboard as 12g34s56c." },
+    { field = "item_level", label = "Share my item level",
+      hint = "Average item level of what you have equipped." },
+    { field = "afk_total", label = "Share my AFK time",
+      hint = "Time flagged AFK, measured by this addon." },
+}
+
+-- Checked means shared. The stored flag is the opposite ("private"), but a
+-- settings panel reads better in the positive and sharing is the default, so
+-- the inversion happens here rather than in the player's head.
+local function isShared(field)
+    return not isPrivate(field)
+end
+
+local function setShared(field, shared)
+    LanDashboardDB.private = LanDashboardDB.private or {}
+    -- nil rather than false, so a shared field leaves no entry behind.
+    LanDashboardDB.private[field] = (not shared) or nil
+end
+
+local function makeToggle(parent, yOffset, label, hint, get, set)
+    local box
+    local ok = pcall(function()
+        box = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
+    end)
+    if not ok or not box then
+        -- Unlike the two templates above, this one is not proven on this
+        -- client. The fallback carries its state in its own text and needs no
+        -- template at all, so the panel cannot be broken by a missing one.
+        box = CreateFrame("Button", nil, parent)
+        box.mark = box:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+        box.mark:SetPoint("LEFT", box, "LEFT", 0, 0)
+    end
+    box:SetSize(26, 26)
+    box:SetPoint("TOPLEFT", parent, "TOPLEFT", 16, yOffset)
+
+    local title = parent:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    title:SetPoint("LEFT", box, "RIGHT", 4, 0)
+    title:SetText(label)
+
+    local sub = parent:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+    sub:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -3)
+    sub:SetWidth(300)
+    sub:SetJustifyH("LEFT")
+    sub:SetText(hint)
+
+    function box:Refresh()
+        local on = get()
+        if self.SetChecked then self:SetChecked(on) end
+        if self.mark then
+            self.mark:SetText(on and "|cff4ade80[x]|r" or "|cff8d8d99[  ]|r")
+        end
+        title:SetText(label)
+    end
+
+    box:SetScript("OnClick", function(self)
+        set(not get())
+        self:Refresh()
+    end)
+    return box
+end
+
+local function buildConfigFrame()
+    local f = CreateFrame("Frame", "LanDashboardConfig", UIParent)
+    f:SetSize(380, 322)
+    f:SetPoint("CENTER")
+    f:SetFrameStrata("DIALOG")
+    f:EnableMouse(true)
+    f:SetMovable(true)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", f.StartMoving)
+    f:SetScript("OnDragStop", f.StopMovingOrSizing)
+    f:Hide()
+
+    -- The rim is drawn first and slightly larger; the fill sits on top and
+    -- inset, leaving a 1px edge. Cheaper than a nine-slice and it cannot go
+    -- missing on a client that moved the backdrop API.
+    local rim = f:CreateTexture(nil, "BACKGROUND")
+    rim:SetPoint("TOPLEFT", f, "TOPLEFT", -1, 1)
+    rim:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 1, -1)
+    rim:SetColorTexture(0.95, 0.66, 0.24, 0.5)
+
+    local fill = f:CreateTexture(nil, "BORDER")
+    fill:SetAllPoints(f)
+    fill:SetColorTexture(0.055, 0.055, 0.07, 0.95)
+
+    local title = f:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+    title:SetPoint("TOPLEFT", f, "TOPLEFT", 16, -14)
+    title:SetText("|cfff3a73cLAN Dashboard|r")
+
+    local version = f:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+    version:SetPoint("LEFT", title, "RIGHT", 6, -1)
+    version:SetText("v3.4.0")
+
+    local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+    close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -2, -2)
+    close:SetScript("OnClick", function() f:Hide() end)
+
+    local heading = f:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+    heading:SetPoint("TOPLEFT", f, "TOPLEFT", 16, -44)
+    heading:SetText("|cff8d8d99WHAT THE DASHBOARD MAY SHOW|r")
+
+    f.toggles = {}
+    local y = -62
+    for _, option in ipairs(PRIVACY_OPTIONS) do
+        local field = option.field
+        f.toggles[#f.toggles + 1] = makeToggle(f, y, option.label, option.hint,
+            function() return isShared(field) end,
+            function(value) setShared(field, value) end)
+        y = y - 44
+    end
+
+    local divider = f:CreateTexture(nil, "ARTWORK")
+    divider:SetPoint("TOPLEFT", f, "TOPLEFT", 16, y - 4)
+    divider:SetSize(348, 1)
+    divider:SetColorTexture(1, 1, 1, 0.08)
+
+    f.toggles[#f.toggles + 1] = makeToggle(f, y - 18, "Show events in chat",
+        "Prints each recorded event. Useful for debugging, noisy otherwise.",
+        function() return LDB_VERBOSE and true or false end,
+        function(value) LDB_VERBOSE = value end)
+
+    local footer = f:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+    footer:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 16, 44)
+    footer:SetWidth(348)
+    footer:SetJustifyH("LEFT")
+    -- Says plainly that nothing takes effect until the next sync. Without it a
+    -- player unticks gold, sees it still on the dashboard, and reasonably
+    -- concludes the setting is broken.
+    footer:SetText("Changes apply at your next sync. Hidden values are never sent " ..
+                   "to the server, so they cannot appear on the dashboard.")
+
+    local sync = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    sync:SetSize(120, 24)
+    sync:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 16, 14)
+    sync:SetText("Sync now")
+    sync:SetScript("OnClick", function()
+        f:Hide()
+        -- Reuses the existing button rather than duplicating its combat
+        -- checks; that path is the one proven safe against taint in-game.
+        syncButton:Show()
+    end)
+
+    local done = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    done:SetSize(90, 24)
+    done:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -16, 14)
+    done:SetText("Close")
+    done:SetScript("OnClick", function() f:Hide() end)
+
+    function f:RefreshAll()
+        for _, toggle in ipairs(self.toggles) do toggle:Refresh() end
+    end
+    return f
+end
+
+local function showConfig()
+    if not configFrame then
+        local ok, built = pcall(buildConfigFrame)
+        if not ok or not built then
+            print("|cffe8a33d[LAN Dashboard] Couldn't open the settings window. " ..
+                  "Use /ldb private gold instead.|r")
+            return
+        end
+        configFrame = built
+    end
+    configFrame:RefreshAll()
+    configFrame:Show()
+end
+
 SLASH_LANDASHBOARD1 = "/ldb"
 SlashCmdList["LANDASHBOARD"] = function(msg)
+    if msg == "" or msg == "config" or msg == "options" then
+        showConfig()
+        return
+    end
     if msg == "sync" then
         syncButton:Show()
         print("|cffe8a33d[LAN Dashboard] Sync button shown — click it (top of screen) to test.|r")
@@ -892,6 +1082,8 @@ SlashCmdList["LANDASHBOARD"] = function(msg)
         print("|cffe8a33d[LAN Dashboard] Forgot all known characters — the next login of each will prompt to sync again.|r")
         return
     end
+    -- Reached by /ldb status, or by any unrecognised argument, so a typo
+    -- still produces something rather than silence.
     print(string.format(
         "|cffe8a33d[LAN Dashboard] score=%d  flush=%d  escalate=%d  queued=%d  |  weights: quest=%d level=%d  |  auto-sync on login: %s  |  echo: %s|r",
         LDB_score, LDB_FLUSH_THRESHOLD, LDB_ESCALATE_THRESHOLD, LanDashboardDB.nextId - 1,
@@ -899,4 +1091,4 @@ SlashCmdList["LANDASHBOARD"] = function(msg)
     ))
 end
 
-print("|cffcd7f32LAN Dashboard v3.3.0 Initialized! Type /ldb to check reload-trigger status, /ldb sync to test the sync button, /ldb probe to report what this client's API exposes.|r")
+print("|cffcd7f32LAN Dashboard v3.4.0 loaded. Type /ldb to open settings.|r")

@@ -2,7 +2,7 @@
 ## Title: LAN Dashboard Data Streamer
 ## Notes: Formats XP and Quest data into the chat stream for real-time LAN tracking.
 ## Author: Cyk
-## Version: 3.3.0
+## Version: 3.4.0
 ## SavedVariables: LanDashboardDB, LDB_WEIGHT_QUEST, LDB_WEIGHT_LEVEL, LDB_FLUSH_THRESHOLD, LDB_ESCALATE_THRESHOLD, LDB_AUTO_SYNC_ON_LOGIN, LDB_VERBOSE
 
 LanDashboard.lua
