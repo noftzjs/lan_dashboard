@@ -136,11 +136,21 @@
             background-color: var(--card-color);
         }
         .big-row .rank { font-size: 17px; font-weight: 800; color: var(--text-dim); width: 28px; font-variant-numeric: tabular-nums; flex: none; }
-        /* Fixed basis so every XP bar begins at the same x. Left to size
+        /* A shared basis so every XP bar begins at the same x. Left to size
            itself, this block grew with the name and dragged the bar with it,
            so the column of bars came out ragged. min-width:0 lets a long name
-           ellipsis instead of pushing the bar right anyway. */
-        .big-row .who-block { flex: 0 0 260px; min-width: 0; }
+           ellipsis instead of pushing the bar right anyway.
+           360px, not the original 260px: that was chosen when the meta line
+           held three items, and gold and played time have since made it five,
+           so the line was being cut (measured at 358px needed against 260px
+           given). The bar beside it has the room -- it runs ~800px on a
+           projector and a progress bar does not need that to say 54.7%.
+           0 1, not 0 0: a non-shrinking 360px plus the bar's 150px floor
+           overflows a phone-width row. Shrink is proportional to basis and
+           every row shares this basis, so they still resolve to equal widths
+           and the bars stay aligned -- the property the fixed basis was
+           introduced to protect. */
+        .big-row .who-block { flex: 0 1 360px; min-width: 0; }
         .big-row .who-block .name, .big-row .who-block .meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .big-row .name { font-size: 19px; font-weight: 700; display: flex; align-items: center; gap: 8px; overflow-wrap: anywhere; }
         .big-row .meta { font-size: 12px; color: var(--text-muted); }
@@ -201,7 +211,7 @@
         </select>
         <select id="activityFilter" onchange="renderDashboard()">
             <option value="active">Active only</option>
-            <option value="all">Show all (incl. idle)</option>
+            <option value="all">Show all</option>
         </select>
         <select id="sortBy" onchange="renderDashboard()">
             <option value="level">Sort by Level</option>
