@@ -279,7 +279,7 @@ def load_state():
     if os.path.exists(STATE_PATH):
         with open(STATE_PATH, encoding="utf-8") as f:
             return json.load(f)
-    return {"sent_count": 0}
+    return {"sent_count": 0, "last_sent": None}
 
 
 def save_state(state):
@@ -482,13 +482,35 @@ def watch(config, stop_event, chosen_path=None):
 
         events = parse_events(text)
 
-        # If the file has fewer events than we've supposedly already
-        # sent, the addon's queue was reset (e.g. SavedVariables wiped
-        # for testing) — start over rather than sending nothing forever.
+        # The addon's queue restarts at index 1 every session, so "already
+        # sent 5" only means anything if these are the same 5. Two ways to
+        # tell it is a different queue:
+        #
+        #   - it is shorter than what we have supposedly already sent, or
+        #   - the event now sitting at the last position we forwarded is not
+        #     the event we forwarded.
+        #
+        # The second case is the one that bit: a queue that came back the
+        # same length looked fully sent, so the watcher sat there connected
+        # and forwarding nothing, with nothing in the log to say why.
+        reset_reason = None
         if len(events) < state["sent_count"]:
-            log_error(f"Event count went backwards ({len(events)} < {state['sent_count']}) "
-                      "— assuming the queue was reset.")
+            reset_reason = f"event count went backwards ({len(events)} < {state['sent_count']})"
+        elif state["sent_count"] and state.get("last_sent") is None:
+            # A state file written before the fingerprint existed. We cannot
+            # tell whether these are the events already sent, and guessing
+            # "yes" is how the silent-stall looked in the first place. Start
+            # over once: at worst one session's events arrive twice, which
+            # beats a watcher that forwards nothing and says nothing.
+            reset_reason = "upgrading from a state file with no queue fingerprint"
+        elif state["sent_count"]:
+            already = events[state["sent_count"] - 1]
+            if already != state["last_sent"]:
+                reset_reason = "the queue holds different events than the ones already sent"
+        if reset_reason:
+            log_error(f"Queue reset detected — {reset_reason}. Starting from the top.")
             state["sent_count"] = 0
+            state["last_sent"] = None
             backed_up_count = 0
 
         for payload in events[backed_up_count:]:
@@ -511,11 +533,13 @@ def watch(config, stop_event, chosen_path=None):
             if not is_well_formed(payload):
                 log_error(f"Skipping malformed queued payload: {payload!r}")
                 state["sent_count"] += 1
+                state["last_sent"] = payload
                 save_state(state)
                 continue
             try:
                 send_packet(config["server_url"], payload, config["ingestion_token"])
                 state["sent_count"] += 1
+                state["last_sent"] = payload
                 delivered += 1
                 save_state(state)
                 if server_down:
@@ -529,6 +553,7 @@ def watch(config, stop_event, chosen_path=None):
                 # behind it forever.
                 log_error(f"Server rejected payload {payload!r}: {e}")
                 state["sent_count"] += 1
+                state["last_sent"] = payload
                 save_state(state)
             except AuthFailed as e:
                 if not server_down:
