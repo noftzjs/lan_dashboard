@@ -179,7 +179,8 @@ async def startup_event():
                 private_fields TEXT,
                 item_level REAL,
                 afk_total INTEGER,
-                professions TEXT
+                professions TEXT,
+                quests_completed INTEGER
             )
         """)
         # Migrate older databases created before these columns were tracked.
@@ -208,6 +209,10 @@ async def startup_event():
             await db.execute("ALTER TABLE player_snapshots ADD COLUMN afk_total INTEGER")
         if "professions" not in existing_columns:
             await db.execute("ALTER TABLE player_snapshots ADD COLUMN professions TEXT")
+        # The game's own lifetime count, which is not the same number as the
+        # quests this dashboard has seen turned in.
+        if "quests_completed" not in existing_columns:
+            await db.execute("ALTER TABLE player_snapshots ADD COLUMN quests_completed INTEGER")
 
         # One-time cleanup: older addon/mock-generator versions stored the
         # literal string "No Guild" for guildless characters, indistinguishable
@@ -278,6 +283,7 @@ async def reload_states_from_db():
                     "item_level": row["item_level"],
                     "afk_total": row["afk_total"],
                     "professions": json.loads(row["professions"] or "[]"),
+                    "quests_completed": row["quests_completed"],
                     "stream_urls": [],
                     "tags": [],
                 }
@@ -422,6 +428,7 @@ def default_state():
         "class": None, "last_activity": None, "gold": None,
         "played_total": None, "played_level": None, "stream_urls": [], "tags": [],
         "private_fields": [], "item_level": None, "afk_total": None, "professions": [],
+        "quests_completed": None,
     }
 
 
@@ -604,7 +611,22 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                     parts[6] if len(parts) > 6 else None, "item_level", private_fields, float)
                 afk_total = parse_optional_number(
                     parts[7] if len(parts) > 7 else None, "afk_total", private_fields)
-                professions = parse_professions(parts[8:]) if len(parts) > 8 else None
+                # From index 8 on, the layout depends on the addon version. A
+                # profession is always name:rank:maxRank -- two colons, never
+                # none -- so a field here with no colon is the lifetime quest
+                # count that addon v3.10.0+ inserts ahead of the list.
+                #
+                # An empty slot is specifically NOT treated as the count: the
+                # older layout writes one there to mean "this character has no
+                # professions", and reading that as a withheld quest count
+                # would invent a privacy choice nobody made.
+                tail = parts[8:] if len(parts) > 8 else None
+                quests_completed = None
+                if tail and tail[0] != "" and ":" not in tail[0]:
+                    quests_completed = parse_optional_number(
+                        tail[0], "quests_completed", private_fields)
+                    tail = tail[1:]
+                professions = parse_professions(tail) if tail is not None else None
                 if not (LEVEL_MIN <= level <= LEVEL_MAX):
                     raise ValueError(f"Level {level} outside valid range {LEVEL_MIN}-{LEVEL_MAX}")
                 if not (0 <= current_xp <= XP_SANITY_CEILING):
@@ -622,6 +644,8 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                     raise ValueError(f"played_level {played_level} exceeds played_total {played_total}")
                 if item_level is not None and not (0 <= item_level <= ITEM_LEVEL_MAX):
                     raise ValueError(f"item_level {item_level} outside sane range")
+                if quests_completed is not None and not (0 <= quests_completed <= QUESTS_COMPLETED_MAX):
+                    raise ValueError(f"quests_completed {quests_completed} outside sane range")
                 if afk_total is not None:
                     if not (0 <= afk_total <= AFK_MAX_SECONDS):
                         raise ValueError(f"afk_total {afk_total} outside sane range")
@@ -642,6 +666,9 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                     "private_fields": private_fields,
                     "item_level": item_level,
                     "afk_total": afk_total,
+                    # None means an older addon that cannot report it, so keep
+                    # what is already known rather than blanking it.
+                    "quests_completed": state["quests_completed"] if quests_completed is None else quests_completed,
                     # None means an older addon that never mentioned them, so
                     # keep whatever was already known rather than wiping it.
                     "professions": state["professions"] if professions is None else professions,
@@ -654,8 +681,8 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                     INSERT INTO player_snapshots
                         (player, level, current_xp, max_xp, pct, last_updated,
                          gold, played_total, played_level, private_fields,
-                         item_level, afk_total, professions)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         item_level, afk_total, professions, quests_completed)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(player) DO UPDATE SET
                         level=excluded.level, current_xp=excluded.current_xp,
                         max_xp=excluded.max_xp, pct=excluded.pct,
@@ -665,11 +692,12 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                         private_fields=excluded.private_fields,
                         item_level=excluded.item_level,
                         afk_total=excluded.afk_total,
-                        professions=excluded.professions
+                        professions=excluded.professions,
+                        quests_completed=excluded.quests_completed
                 """, (player_name, level, current_xp, max_xp, pct, last_updated,
                       gold, state["played_total"], state["played_level"],
                       json.dumps(private_fields), item_level, afk_total,
-                      json.dumps(state["professions"])))
+                      json.dumps(state["professions"]), state["quests_completed"]))
                 await db.execute("""
                     INSERT INTO xp_history
                         (timestamp, player, log_type, level, current_xp, max_xp,
@@ -983,6 +1011,7 @@ async def get_analytics_page(_user: str = Depends(require_roster_auth)):
 
 # Quest reward bands. Boundaries are round numbers a player recognises rather
 # than computed quantiles, so the buckets mean the same thing run to run.
+QUESTS_COMPLETED_MAX = 200_000
 QUEST_BANDS = [(0, 250), (250, 500), (500, 1000), (1000, 2000), (2000, XP_SANITY_CEILING)]
 
 
@@ -1127,7 +1156,13 @@ async def get_analytics(_user: str = Depends(require_roster_auth)):
             "professions": state.get("professions", []),
             "zone": state.get("current_zone"),
             "idle_seconds": idle_seconds(state),
+            # Two different numbers, deliberately both present. "quests" is
+            # what this dashboard has seen turned in, which powers the XP
+            # breakdown and undercounts anything that happened before the
+            # addon was installed or was lost in transit. "quests_completed"
+            # is the game's own lifetime figure.
             "quests": quest_count.get(name, 0),
+            "quests_completed": state.get("quests_completed"),
             "deaths": deaths.get(name, 0),
             "quest_xp": quests_xp,
             # Quest XP is reported by the game, while the total is inferred from

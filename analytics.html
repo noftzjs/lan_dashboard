@@ -238,7 +238,7 @@
         const tiles = [
             ["Characters tracked", fmt(t.characters), `${d.players.filter(p => p.level > 1).length} past level 1`],
             ["Levels gained", fmt(t.levels_gained), "across everyone"],
-            ["Quests turned in", fmt(t.quests), `${fmt(t.quest_xp)} XP rewarded`],
+            ["Quests turned in", fmt(t.quests), `${fmt(t.quest_xp)} XP rewarded · seen by this dashboard`],
             ["XP recorded", fmt(t.xp_recorded), timed ? `${fmt(timed)} events timed` : "no timed events yet"],
             ["Deaths", fmt(t.deaths), t.deaths ? "across everyone" : "nobody has died yet"],
         ];
@@ -766,7 +766,11 @@
                     <td class="${p.faction === "Alliance" ? "faction-alliance" : p.faction === "Horde" ? "faction-horde" : ""}">${escapeHtml(p.faction || "—")}</td>
                     <td class="num">${p.level}</td>
                     <td class="num">${p.max_xp === 0 ? "MAX" : p.pct + "%"}</td>
-                    <td class="num">${fmt(p.quests)}</td>
+                    <td class="num" title="${p.quests_completed != null
+                        ? `The game's lifetime count. This dashboard has seen ${fmt(p.quests)} turned in since the addon was installed.`
+                        : "Counted from quests this dashboard has seen turned in — the game's own figure needs addon v3.10.0 or newer."}">${
+                        p.quests_completed != null ? fmt(p.quests_completed) : fmt(p.quests)
+                        }${p.quests_completed != null && p.quests_completed !== p.quests ? ` <span class="csub">(${fmt(p.quests)} here)</span>` : ""}</td>
                     <td class="num">${fmt(p.deaths)}</td>
                     <td class="num" title="${escapeHtml(goldTitle(p))}">${goldHtml(p)}</td>
                     <td class="num">${formatPlayed(p.played_total)}</td>

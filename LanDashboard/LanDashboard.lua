@@ -323,6 +323,38 @@ local function equippedItemLevel()
     return tonumber(equipped) or tonumber(overall)
 end
 
+-- The game's own count of quests this character has ever completed.
+--
+-- Different from the number the dashboard derives from QUEST events, which
+-- only covers what the addon has seen and what survived delivery. Measured on
+-- build 70009: statistic 98 reads 109 for a character whose recorded events
+-- say fewer.
+--
+-- The id is verified rather than trusted. This beta has already changed an
+-- API's return shape mid-project, and a statistic id that quietly came to
+-- mean something else would put a wrong number on the dashboard with nothing
+-- to show it was wrong. isStatistic is checked instead of the name, because
+-- the name is localised and would fail on a non-English client.
+local QUESTS_COMPLETED_STATISTIC = 98
+
+local function lifetimeQuestCount()
+    if type(GetAchievementInfo) ~= "function" or type(GetStatistic) ~= "function" then
+        return nil
+    end
+    local okInfo, _, _, _, _, _, _, _, _, _, _, _, _, _, _, isStatistic =
+        pcall(GetAchievementInfo, QUESTS_COMPLETED_STATISTIC)
+    if not okInfo or isStatistic ~= true then
+        return nil
+    end
+    local okValue, value = pcall(GetStatistic, QUESTS_COMPLETED_STATISTIC)
+    if not okValue then return nil end
+    -- "--" is the client's "nothing recorded"; anything non-numeric (a money
+    -- statistic carries texture markup, for instance) is not ours to send.
+    local count = tonumber(value)
+    if not count or count < 0 then return nil end
+    return math.floor(count)
+end
+
 local function sendStatus(playerName)
     local level = UnitLevel("player") or 1
     local currentXP = UnitXP("player") or 0
@@ -359,12 +391,23 @@ local function sendStatus(playerName)
     local afkField = isPrivate("afk_total") and "" or
         string.format("%d", afkTotalFor(playerName))
 
-    -- The trailing comma is load-bearing: it makes the profession list present
-    -- but empty, which the server reads as "this character has none". Without
-    -- it the field is absent, and absent means "an older addon that cannot
-    -- report professions" -- so the server would keep stale ones instead.
-    emit(playerName, "STATUS", string.format("%s,%s,%s,%s",
-        head, itemLevelField, afkField, table.concat(professions or {}, ",")))
+    -- The tail is assembled rather than formatted, because the quest count is
+    -- only present when there is one to send. Leaving it out entirely is what
+    -- keeps the old layout valid: the server tells the two apart by shape, and
+    -- an empty slot there still means "no professions", not "no quests".
+    --
+    -- The profession list goes last and keeps its trailing comma, which is
+    -- load-bearing: it makes the list present but empty, which reads as "this
+    -- character has none". Without it the field is absent, and absent means
+    -- "an older addon that cannot report professions", so the server would
+    -- keep stale ones instead.
+    local tail = { itemLevelField, afkField }
+    local quests = lifetimeQuestCount()
+    if quests then
+        tail[#tail + 1] = tostring(quests)
+    end
+    tail[#tail + 1] = table.concat(professions or {}, ",")
+    emit(playerName, "STATUS", head .. "," .. table.concat(tail, ","))
 end
 
 -- Time played is only knowable by asking the server and waiting for the
@@ -974,7 +1017,7 @@ local function probeStatistics()
 end
 
 local function runProbe()
-    local report = { addon = "3.9.0" }
+    local report = { addon = "3.10.0" }
     report.when = (date and date("%Y-%m-%d %H:%M:%S")) or tostring(time and time() or "?")
 
     local okBuild, version, build, buildDate, tocVersion = pcall(GetBuildInfo)
@@ -1168,7 +1211,7 @@ local function buildConfigFrame()
 
     local version = f:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
     version:SetPoint("LEFT", title, "RIGHT", 6, -1)
-    version:SetText("v3.9.0")
+    version:SetText("v3.10.0")
 
     local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -2, -2)
@@ -1390,4 +1433,4 @@ SlashCmdList["LANDASHBOARD"] = function(msg)
     ))
 end
 
-print("|cffcd7f32LAN Dashboard v3.9.0 loaded. Type /ldb to open settings.|r")
+print("|cffcd7f32LAN Dashboard v3.10.0 loaded. Type /ldb to open settings.|r")
