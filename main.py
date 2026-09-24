@@ -135,7 +135,8 @@ async def startup_event():
                 xp_reward INTEGER,
                 event_time TEXT,
                 gold INTEGER,
-                played_total INTEGER
+                played_total INTEGER,
+                zone TEXT
             )
         """)
         # event_time is when the event happened in game (addon v2.11.0+); the
@@ -146,6 +147,13 @@ async def startup_event():
         history_columns = {row[1] for row in await cursor.fetchall()}
         if "event_time" not in history_columns:
             await db.execute("ALTER TABLE xp_history ADD COLUMN event_time TEXT")
+        # Where a death happened. The addon has always sent this -- it was
+        # validated and then dropped on the floor, because there was nowhere to
+        # put it. Deaths recorded before this column existed have no zone, so
+        # anything charting it has to treat NULL as "unknown" rather than as a
+        # place.
+        if "zone" not in history_columns:
+            await db.execute("ALTER TABLE xp_history ADD COLUMN zone TEXT")
         # Stored per STATUS row so gold and playtime can be charted over a
         # LAN rather than only read as a current value.
         for column in ("gold", "played_total"):
@@ -672,10 +680,11 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                     raise ValueError(f"Zone name too long ({len(death_zone)} chars): {death_zone!r}")
                 player_states.setdefault(player_name, default_state())
                 await db.execute("""
-                    INSERT INTO xp_history (timestamp, player, log_type, level, event_time)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO xp_history (timestamp, player, log_type, level, event_time, zone)
+                    VALUES (?, ?, ?, ?, ?, ?)
                 """, (payload.timestamp, player_name, log_type, level,
-                      event_time.isoformat() if event_time else None))
+                      event_time.isoformat() if event_time else None,
+                      death_zone or None))
 
             else:
                 raise ValueError(f"Unknown log_type {log_type!r} in payload: {payload.data!r}")
@@ -1029,6 +1038,26 @@ async def get_analytics(_user: str = Depends(require_roster_auth)):
             " AND played_total IS NOT NULL ORDER BY event_time"
         ) as cursor:
             played_rows = await cursor.fetchall()
+        # Deaths split two ways. By level answers "where does it get
+        # dangerous", and works on every death ever recorded. By zone answers
+        # "what keeps killing people", and only covers deaths recorded since
+        # the zone column existed -- hence the separate count, so the page can
+        # say so rather than quietly under-reporting.
+        async with db.execute(
+            "SELECT level, COUNT(*) AS n FROM xp_history"
+            " WHERE log_type='DEATH' GROUP BY level ORDER BY level"
+        ) as cursor:
+            deaths_by_level = [{"level": r["level"], "deaths": r["n"]} for r in await cursor.fetchall()]
+        async with db.execute(
+            "SELECT zone, COUNT(*) AS n FROM xp_history"
+            " WHERE log_type='DEATH' AND zone IS NOT NULL AND zone != ''"
+            " GROUP BY zone ORDER BY n DESC, zone"
+        ) as cursor:
+            deaths_by_zone = [{"zone": r["zone"], "deaths": r["n"]} for r in await cursor.fetchall()]
+        async with db.execute(
+            "SELECT COUNT(*) AS n FROM xp_history WHERE log_type='DEATH' AND (zone IS NULL OR zone = '')"
+        ) as cursor:
+            deaths_without_zone = (await cursor.fetchone())["n"]
         async with db.execute("SELECT COUNT(*) AS n FROM xp_history") as cursor:
             history_total = (await cursor.fetchone())["n"]
         async with db.execute(
@@ -1152,6 +1181,9 @@ async def get_analytics(_user: str = Depends(require_roster_auth)):
         "level_costs": [{"level": row["level"], "xp": row["cost"]} for row in level_rows],
         "velocity": velocity,
         "level_times": level_times,
+        "deaths_by_level": deaths_by_level,
+        "deaths_by_zone": deaths_by_zone,
+        "deaths_without_zone": deaths_without_zone,
         "history": {"rows": history_total, "timed_rows": len(timed_rows)},
         "stale_after_seconds": STALE_AFTER_SECONDS,
     }

@@ -38,13 +38,14 @@ if not exist ".venv\Scripts\python.exe" (
     exit /b 1
 )
 
+REM Not an error: the server creates and migrates the database on startup, so
+REM starting without one is how you rebuild it. The earlier version refused
+REM here, which blocked the exact workflow its own message recommended.
 if not exist "demo_lan.db" (
     echo.
-    echo   ERROR: demo_lan.db not found next to this script.
-    echo   Start the server against an empty DB and run seed_demo.py to build it.
+    echo   No demo_lan.db yet - it will be created empty.
+    echo   Seed it once this is running:  .venv\Scripts\python.exe seed_demo.py
     echo.
-    pause
-    exit /b 1
 )
 
 netstat -ano -p tcp | findstr /r /c:"LISTENING" | findstr /c:"127.0.0.1:%PORT% " >nul

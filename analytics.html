@@ -119,6 +119,11 @@
            median. */
         .grind-dot { fill: #b9b9c4; opacity: 0.9; stroke: var(--card-color); stroke-width: 1.4; }
         .grind-dot.leader { fill: var(--accent-color); opacity: 1; stroke: var(--card-color); stroke-width: 1.4; }
+        .death-zone { fill: var(--s2); }
+        .death-zone:hover { fill: var(--accent-color); }
+        .death-lvl { fill: var(--s1); }
+        .death-lvl:hover { fill: var(--accent-color); }
+        .death-sub { color: var(--text-muted); font-size: 12px; margin: 16px 0 2px; }
         .empty { color: var(--text-muted); font-size: 13px; padding: 18px 0; }
         .empty b { color: var(--accent-color); }
         details { border-top: 1px solid var(--border-color); margin-top: 14px; padding-top: 10px; }
@@ -184,6 +189,12 @@
         <h2>Race to 60</h2>
         <p class="answers">Level over time, on the in-game clock. The leader is highlighted; hover any line or name to follow that character.</p>
         <div id="velocity"></div>
+    </div>
+
+    <div class="panel">
+        <h2>Where it goes wrong</h2>
+        <p class="answers">Deaths by zone, and the level they happened at. Zones come from the death itself, not from wherever that character is now.</p>
+        <div id="deaths"></div>
     </div>
 
     <div class="panel">
@@ -557,6 +568,80 @@
         host.appendChild(table);
     }
 
+    // Two views of the same deaths. Zone answers "what keeps killing people",
+    // level answers "where does it get dangerous". They cover different
+    // amounts of history -- the zone rode along in the payload from the start
+    // but was discarded until there was a column for it -- so deaths that
+    // predate that are counted and named rather than quietly dropped.
+    function renderDeaths(byZone, byLevel, withoutZone) {
+        const host = document.getElementById("deaths");
+        if (!byZone.length && !byLevel.length) {
+            host.innerHTML = `<p class="empty">Nobody has died yet. <b>Either this is a careful group or the LAN just started.</b></p>`;
+            return;
+        }
+
+        // --- by zone: horizontal bars, deadliest first ---------------------
+        // Eight is enough to carry the story; the rest are summed in a note
+        // below rather than turning the panel into a scroll of two-death
+        // zones.
+        const TOP = 8;
+        const zones = byZone.slice(0, TOP);
+        const rest = byZone.slice(TOP);
+        const restDeaths = rest.reduce((n, z) => n + z.deaths, 0);
+        const maxZone = Math.max(...zones.map(z => z.deaths), 1);
+        const rowH = 26, labelW = 168, barMax = 380;
+        const zoneSvg = zones.length ? `
+            <svg viewBox="0 0 ${labelW + barMax + 60} ${zones.length * rowH + 10}" role="img"
+                 aria-label="Deaths by zone, most lethal first">
+                ${zones.map((z, i) => {
+                    const y = i * rowH + 4;
+                    const w = Math.max(2, (z.deaths / maxZone) * barMax);
+                    return `<text class="axis-text" x="${labelW - 8}" y="${y + 13}" text-anchor="end">${escapeHtml(z.zone)}</text>
+                            <rect class="death-zone" x="${labelW}" y="${y + 3}" width="${w.toFixed(1)}" height="${rowH - 12}" rx="3">
+                              <title>${escapeHtml(z.zone)}: ${z.deaths} death${z.deaths === 1 ? "" : "s"}</title></rect>
+                            <text class="axis-text" x="${labelW + w + 8}" y="${y + 13}">${z.deaths}</text>`;
+                }).join("")}
+            </svg>` : "";
+
+        // --- by level: a compact column per level --------------------------
+        const levels = byLevel;
+        const maxLvl = Math.max(...levels.map(l => l.deaths), 1);
+        const LW = 640, LH = 130, LL = 30, LR = LW - 10, LT = 10, LB = LH - 24;
+        const slot = (LR - LL) / Math.max(levels.length, 1);
+        const barW = Math.max(5, Math.min(20, slot * 0.6));
+        const levelSvg = levels.length ? `
+            <svg viewBox="0 0 ${LW} ${LH}" role="img" aria-label="Deaths at each level">
+                <line class="grid-line" x1="${LL}" y1="${LB}" x2="${LR}" y2="${LB}"/>
+                <text class="axis-text" x="${LL - 6}" y="${LT + 8}" text-anchor="end">${maxLvl}</text>
+                ${levels.map((l, i) => {
+                    const cx = LL + slot * i + slot / 2;
+                    const h = Math.max(1, (l.deaths / maxLvl) * (LB - LT));
+                    const label = (levels.length <= 12 || l.level % 2 === 0 || i === levels.length - 1)
+                        ? `<text class="axis-text" x="${cx.toFixed(1)}" y="${LB + 15}" text-anchor="middle">${l.level}</text>` : "";
+                    return `<rect class="death-lvl" x="${(cx - barW / 2).toFixed(1)}" y="${(LB - h).toFixed(1)}"
+                              width="${barW.toFixed(1)}" height="${h.toFixed(1)}" rx="2">
+                              <title>Level ${l.level}: ${l.deaths} death${l.deaths === 1 ? "" : "s"}</title></rect>${label}`;
+                }).join("")}
+            </svg>` : "";
+
+        const total = byLevel.reduce((n, l) => n + l.deaths, 0);
+        host.innerHTML = `
+            <div class="chart-scroll">${zoneSvg}</div>
+            ${rest.length ? `<p class="death-sub">${rest.length} other zone${rest.length === 1 ? "" : "s"} accounted for ${restDeaths} more.</p>` : ""}
+            ${withoutZone ? `<p class="death-sub">${withoutZone} death${withoutZone === 1 ? "" : "s"} recorded before zones were kept, so ${withoutZone === 1 ? "it isn't" : "they aren't"} placed above &mdash; ${withoutZone === 1 ? "it still counts" : "they still count"} below.</p>` : ""}
+            <p class="death-sub">At what level &mdash; ${total} death${total === 1 ? "" : "s"} in total</p>
+            <div class="chart-scroll">${levelSvg}</div>
+            <details><summary>Table view</summary>
+              <div class="table-scroll"><table class="data">
+                <thead><tr><th>Zone</th><th class="num">Deaths</th><th class="num">Share</th></tr></thead>
+                <tbody>${byZone.map(z => `<tr><td>${escapeHtml(z.zone)}</td><td class="num">${z.deaths}</td>
+                    <td class="num">${total ? ((z.deaths / total) * 100).toFixed(1) : "0"}%</td></tr>`).join("")}
+                ${withoutZone ? `<tr><td class="csub">Not recorded</td><td class="num">${withoutZone}</td>
+                    <td class="num">${total ? ((withoutZone / total) * 100).toFixed(1) : "0"}%</td></tr>` : ""}
+                </tbody></table></div>
+            </details>`;
+    }
+
     function renderRoster(players, staleAfter) {
         document.getElementById("roster").innerHTML = `
             <thead><tr>
@@ -599,6 +684,7 @@
             renderBands(data.quest_bands);
             renderGrind(data.level_times, data.velocity);
             renderVelocity(data.velocity, data.history);
+            renderDeaths(data.deaths_by_zone, data.deaths_by_level, data.deaths_without_zone);
             renderRoster(data.players, data.stale_after_seconds);
             document.getElementById("scope").textContent =
                 `${data.history.rows.toLocaleString()} events recorded`;
