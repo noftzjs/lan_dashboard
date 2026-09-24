@@ -581,6 +581,11 @@ local PROBE_NAMESPACES = {
     { "C_Container", { "GetContainerNumSlots" } },
     { "C_CurrencyInfo", { "GetCurrencyInfo" } },
     { "C_DateAndTime", { "GetServerTimeLocal" } },
+    -- Whether the settings panel can register itself in the game's own options
+    -- menu, instead of only opening from /ldb. The two lineages disagree here
+    -- (retail uses Settings.*, Classic used InterfaceOptions_AddCategory) and
+    -- this client is neither, so it gets probed rather than guessed at.
+    { "Settings", { "RegisterCanvasLayoutCategory", "RegisterAddOnCategory", "OpenToCategory" } },
 }
 
 -- COMBAT_LOG_EVENT_UNFILTERED is deliberately NOT in this list. It is already

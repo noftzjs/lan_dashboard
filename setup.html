@@ -210,10 +210,21 @@
             </ol>
             <h3>Why it arrives in bursts</h3>
             <p>WoW addons can't send anything over the internet, and WoW only writes the addon's data to disk when the UI reloads or you log out. So the addon offers the Sync button at good moments &mdash; after a few quests or a level-up, when you take a flight, go AFK, or hit a loading screen. Click it, dismiss it with the X, or type <code>/reload</code> whenever you like. Logging out syncs everything too.</p>
+            <h3>Choosing what you share</h3>
+            <p>Type <code>/ldb</code> in game to open the addon's settings. Everything the dashboard can show about you is listed there, with its current state, so nothing depends on remembering a command:</p>
+            <img class="shot" src="/static/ingame-settings.png"
+                 alt="The in-game LAN Dashboard settings panel. Checkboxes for sharing gold, item level and AFK time are ticked; a separate one for showing events in chat is unticked. A note reads that changes apply at your next sync."
+                 width="389" height="330" loading="lazy">
+            <p>Untick anything you'd rather keep to yourself &mdash; a hidden value is <b>never sent to the server at all</b>, so it can't appear on the dashboard or in anyone's browser. The dashboard shows <i>private</i> in that spot rather than a blank, so it's clear you chose to hide it instead of looking like your watcher is broken.</p>
+            <p class="muted">Changes take effect at your next sync, not instantly &mdash; if you untick gold and still see it on the dashboard, click <b>Sync now</b> (or <code>/reload</code>) and it'll clear.</p>
+
             <h3>Addon commands</h3>
+            <p class="muted">All of these are optional &mdash; the settings panel covers everything most people need.</p>
             <table class="cmds">
-                <tr><td><code>/ldb</code></td><td>Shows your sync status: pending score and how many events are queued.</td></tr>
+                <tr><td><code>/ldb</code></td><td>Opens the settings panel.</td></tr>
                 <tr><td><code>/ldb sync</code></td><td>Shows the Sync button right now.</td></tr>
+                <tr><td><code>/ldb status</code></td><td>Prints your sync status: pending score and how many events are queued.</td></tr>
+                <tr><td><code>/ldb private gold</code></td><td>The same toggle as the panel, if you prefer typing. Also <code>item_level</code> and <code>afk_total</code>.</td></tr>
                 <tr><td><code>/ldb forget</code></td><td>Makes the addon treat your characters as new, so the next login prompts to sync again. Only needed if the dashboard was reset.</td></tr>
             </table>
         </div>
