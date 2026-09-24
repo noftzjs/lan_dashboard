@@ -70,6 +70,38 @@
         table.data th { color: var(--text-muted); font-weight: 500; font-size: 12px; cursor: default; }
         table.data td.num, table.data th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
+        /* Race chart. Identity is carried by interaction, not by hue.
+           Measured, not assumed: on this surface the validator accepts only
+           about four categorical hues inside the L 0.48-0.67 band before
+           pairs collide (purple/blue 12.8 normal, gold/orange 11.2, cyan and
+           pink against green), and a LAN has more characters than that. So
+           every line is recessive, the leader carries the accent, and hovering
+           any line or name brings it forward. That scales to twenty players
+           where a palette cannot, and it never repaints on an overtake --
+           colour here follows the leader role, not a rank ordering. */
+        .race-line { fill: none; stroke-width: 1.75; stroke-linejoin: round; stroke-linecap: round;
+                     stroke: var(--neutral-color); opacity: 0.55; transition: opacity .12s, stroke-width .12s; }
+        .race-line.leader { stroke: var(--accent-color); opacity: 1; stroke-width: 2.5; }
+        .race-hit { fill: none; stroke: transparent; stroke-width: 14; cursor: pointer; }
+        .race-wrap.dim .race-line { opacity: 0.18; }
+        .race-wrap.dim .race-line.on { stroke: var(--accent-color); opacity: 1; stroke-width: 3; }
+        .race-end { stroke: var(--card-color); stroke-width: 2; }
+        .race-name { fill: var(--text-muted); font-size: 11px; }
+        .race-name.leader { fill: var(--accent-color); }
+        .race-tip { position: absolute; pointer-events: none; z-index: 5; background-color: #101014;
+                    border: 1px solid var(--border-color); border-radius: 6px; padding: 6px 9px;
+                    font-size: 12px; color: var(--text-color); white-space: nowrap;
+                    box-shadow: 0 4px 14px rgba(0,0,0,.5); }
+        .race-tip b { color: var(--accent-color); }
+        .race-tip span { color: var(--text-muted); }
+        .race-names { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+        .race-names button { background-color: transparent; border: 1px solid var(--border-color);
+                             border-radius: 999px; padding: 3px 10px; font-size: 11.5px;
+                             color: var(--text-muted); cursor: pointer; font-family: inherit; }
+        .race-names button:hover, .race-names button:focus-visible { border-color: var(--accent-color); color: var(--text-color); }
+        .race-names button .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+                                  background-color: var(--neutral-color); margin-right: 6px; vertical-align: middle; }
+        .race-names button.leader .dot { background-color: var(--accent-color); }
         .empty { color: var(--text-muted); font-size: 13px; padding: 18px 0; }
         .empty b { color: var(--accent-color); }
         details { border-top: 1px solid var(--border-color); margin-top: 14px; padding-top: 10px; }
@@ -129,7 +161,7 @@
 
     <div class="panel">
         <h2>Race to 60</h2>
-        <p class="answers">Level over time, using the in-game clock.</p>
+        <p class="answers">Level over time, on the in-game clock. The leader is highlighted; hover any line or name to follow that character.</p>
         <div id="velocity"></div>
     </div>
 
@@ -293,6 +325,15 @@
             </svg>`;
     }
 
+    // Level over time, one line per character.
+    //
+    // Deliberately not a colour-per-character chart: the palette validator
+    // accepts only about four hues on this surface before pairs become
+    // indistinguishable, and a LAN has more characters than that. Cycling a
+    // short palette (what this did before) is worse than no colour at all --
+    // three characters shared each hue, so the legend could not be read. Here
+    // every line is recessive, the leader carries the accent, and hovering a
+    // line or a name brings it forward with a tooltip.
     function renderVelocity(velocity, history) {
         const host = document.getElementById("velocity");
         const names = Object.keys(velocity);
@@ -303,40 +344,163 @@
             host.innerHTML = `<p class="empty">${why} <b>This chart fills in as people play on addon v2.11.0 or newer</b>, which stamps every event with the game's clock. Events recorded before that upgrade can't appear here.</p>`;
             return;
         }
-        const series = names.map(n => velocity[n].map(p => ({ t: Date.parse(p.at), level: p.level })))
-                            .map(pts => pts.sort((a, b) => a.t - b.t));
-        const allT = series.flat().map(p => p.t);
-        const allL = series.flat().map(p => p.level);
-        const minT = Math.min(...allT), maxT = Math.max(...allT);
-        const minL = Math.min(...allL), maxL = Math.max(...allL);
-        const spanT = Math.max(1, maxT - minT), spanL = Math.max(1, maxL - minL);
-        const L = 46, R = 560, T = 20, B = 190;
-        const x = (t) => L + ((t - minT) / spanT) * (R - L);
-        const y = (lv) => B - ((lv - minL) / spanL) * (B - T);
-        const colours = ["var(--s1)", "var(--s2)", "var(--s3)"];
 
-        const lines = series.map((pts, i) => {
-            const colour = colours[i % colours.length];
-            const d = pts.map(p => `${x(p.t)},${y(p.level)}`).join(" ");
-            const last = pts[pts.length - 1];
-            return `<polyline fill="none" stroke="${colour}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="${d}"/>
-                    <circle cx="${x(last.t)}" cy="${y(last.level)}" r="4.5" fill="${colour}" stroke="var(--card-color)" stroke-width="2"/>`;
+        const series = names.map(name => ({
+            name,
+            points: velocity[name]
+                .map(p => ({ t: Date.parse(p.at), level: p.level }))
+                .sort((a, b) => a.t - b.t),
+        }));
+        const flat = series.flatMap(s => s.points);
+        const minT = Math.min(...flat.map(p => p.t));
+        const maxT = Math.max(...flat.map(p => p.t));
+        const maxL = Math.max(...flat.map(p => p.level));
+        const spanT = Math.max(1, maxT - minT);
+
+        // Level starts at 1 rather than the lowest observed, so the axis means
+        // the same thing on every run instead of rescaling as people level.
+        const minL = 1;
+        const spanL = Math.max(1, maxL - minL);
+
+        const W = 640, H = 260;
+        const L = 44, R = W - 96, T = 16, B = H - 42;
+        const x = t => L + ((t - minT) / spanT) * (R - L);
+        const y = lv => B - ((lv - minL) / spanL) * (B - T);
+
+        // The leader is whoever is highest at the end, ties broken by getting
+        // there first -- which is what "leading" means in a race.
+        const ranked = [...series].sort((a, b) => {
+            const la = a.points[a.points.length - 1], lb = b.points[b.points.length - 1];
+            return lb.level - la.level || la.t - lb.t;
+        });
+        const leader = ranked[0].name;
+
+        // Ticks land on round levels (5, 10, 15...) rather than counting up
+        // from 1, which produced 1/6/11/16 -- numerically fine, but nobody
+        // thinks about levels that way.
+        const levelStep = spanL > 24 ? 10 : spanL > 10 ? 5 : 2;
+        const yTicks = [minL];
+        for (let lv = Math.ceil(minL / levelStep) * levelStep; lv <= maxL; lv += levelStep) {
+            if (lv !== minL) yTicks.push(lv);
+        }
+        if (yTicks[yTicks.length - 1] !== maxL) yTicks.push(maxL);
+
+        // Time ticks on whole hours, at a spacing that yields a handful of
+        // labels whatever the LAN's length.
+        const hoursSpan = spanT / 3600000;
+        const hourStep = hoursSpan > 36 ? 12 : hoursSpan > 12 ? 6 : hoursSpan > 4 ? 2 : 1;
+        const xTicks = [];
+        const first = new Date(minT); first.setMinutes(0, 0, 0);
+        for (let h = 0; ; h += hourStep) {
+            const at = first.getTime() + h * 3600000;
+            if (at > maxT) break;
+            if (at >= minT) xTicks.push(at);
+        }
+
+        const grid = [
+            ...yTicks.map(lv => `<line class="grid-line" x1="${L}" y1="${y(lv).toFixed(1)}" x2="${R}" y2="${y(lv).toFixed(1)}"/>
+                 <text class="axis-text" x="${L - 8}" y="${(y(lv) + 4).toFixed(1)}" text-anchor="end">${lv}</text>`),
+            // Over a multi-day LAN the same hour comes round again, so the
+            // weekday rides along once the span passes a day.
+            ...xTicks.map(t => {
+                const d = new Date(t);
+                const hour = d.toLocaleTimeString([], { hour: "numeric" });
+                const label = hoursSpan > 24
+                    ? `${d.toLocaleDateString([], { weekday: "short" })} ${hour}`
+                    : hour;
+                return `<text class="axis-text" x="${x(t).toFixed(1)}" y="${B + 18}" text-anchor="middle">${label}</text>`;
+            }),
+        ].join("");
+
+        const paths = series.map((s, i) => {
+            const d = s.points.map(p => `${x(p.t).toFixed(1)},${y(p.level).toFixed(1)}`).join(" ");
+            const isLeader = s.name === leader;
+            const last = s.points[s.points.length - 1];
+            return `<polyline class="race-line${isLeader ? " leader" : ""}" data-i="${i}" points="${d}"/>
+                    <circle class="race-end" cx="${x(last.t).toFixed(1)}" cy="${y(last.level).toFixed(1)}" r="${isLeader ? 4.5 : 3}"
+                            fill="${isLeader ? "var(--accent-color)" : "var(--neutral-color)"}" data-i="${i}"/>
+                    <polyline class="race-hit" data-i="${i}" points="${d}"><title>${escapeHtml(s.name)} — level ${last.level}</title></polyline>`;
         }).join("");
 
-        const hours = Math.round((maxT - minT) / 3600000);
+        // Only the leader is labelled on the chart. Labelling seven would
+        // collide; everyone else is reachable by hover and by the name row.
+        const leaderSeries = series.find(s => s.name === leader);
+        const leaderLast = leaderSeries.points[leaderSeries.points.length - 1];
+        const leaderLabel = `<text class="race-name leader" x="${(x(leaderLast.t) + 9).toFixed(1)}" y="${(y(leaderLast.level) + 4).toFixed(1)}">${escapeHtml(leader)}</text>`;
+
+        const days = Math.round(spanT / 3600000);
         host.innerHTML = `
-            <div class="chart-scroll">
-            <svg viewBox="0 0 640 214" role="img" aria-label="Level over time per character">
-                <line class="grid-line" x1="${L}" y1="${B}" x2="${R + 40}" y2="${B}"/>
-                <line class="grid-line" x1="${L}" y1="${T}" x2="${R + 40}" y2="${T}"/>
-                <text class="axis-text" x="${L - 8}" y="${B + 4}" text-anchor="end">${minL}</text>
-                <text class="axis-text" x="${L - 8}" y="${T + 4}" text-anchor="end">${maxL}</text>
-                ${lines}
-                <text class="axis-text" x="${L}" y="210">${new Date(minT).toLocaleString()}</text>
-                <text class="axis-text" x="${R + 40}" y="210" text-anchor="end">${hours >= 1 ? hours + "h later" : "under an hour"}</text>
-            </svg></div>
-            <p class="legend">${names.map((n, i) => `
-                <span class="key"><span class="sw" style="background-color:${colours[i % colours.length]}"></span>${escapeHtml(n)}</span>`).join("")}</p>`;
+            <div class="race-wrap" style="position:relative">
+              <div class="chart-scroll">
+                <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Level over time for each character, with the leader highlighted">
+                    <line class="grid-line" x1="${L}" y1="${B}" x2="${R}" y2="${B}"/>
+                    ${grid}${paths}${leaderLabel}
+                    <text class="axis-text" x="${L}" y="${H - 6}">${new Date(minT).toLocaleDateString([], { month: "short", day: "numeric" })}</text>
+                    <text class="axis-text" x="${R}" y="${H - 6}" text-anchor="end">${days}h of play</text>
+                </svg>
+              </div>
+              <div class="race-names">${ranked.map(s => {
+                  const i = series.indexOf(s);
+                  const last = s.points[s.points.length - 1];
+                  return `<button type="button" data-i="${i}" class="${s.name === leader ? "leader" : ""}"><span class="dot"></span>${escapeHtml(s.name)} <span style="opacity:.6">L${last.level}</span></button>`;
+              }).join("")}</div>
+            </div>`;
+
+        // --- hover layer ---------------------------------------------------
+        const wrap = host.querySelector(".race-wrap");
+        const tip = document.createElement("div");
+        tip.className = "race-tip";
+        tip.hidden = true;
+        wrap.appendChild(tip);
+
+        const lines = [...wrap.querySelectorAll(".race-line")];
+        function highlight(i, event) {
+            wrap.classList.add("dim");
+            lines.forEach(l => l.classList.toggle("on", Number(l.dataset.i) === i));
+            const s = series[i];
+            const last = s.points[s.points.length - 1];
+            const hours = Math.round((last.t - s.points[0].t) / 3600000);
+            tip.innerHTML = `<b>${escapeHtml(s.name)}</b><br><span>level ${last.level} after ${hours}h</span>`;
+            tip.hidden = false;
+            if (event) {
+                const box = wrap.getBoundingClientRect();
+                tip.style.left = Math.min(event.clientX - box.left + 12, box.width - tip.offsetWidth - 8) + "px";
+                tip.style.top = Math.max(event.clientY - box.top - 44, 0) + "px";
+            }
+        }
+        function clear() {
+            wrap.classList.remove("dim");
+            lines.forEach(l => l.classList.remove("on"));
+            tip.hidden = true;
+        }
+        wrap.querySelectorAll(".race-hit").forEach(hit => {
+            hit.addEventListener("mousemove", e => highlight(Number(hit.dataset.i), e));
+            hit.addEventListener("mouseleave", clear);
+        });
+        wrap.querySelectorAll(".race-names button").forEach(btn => {
+            const i = Number(btn.dataset.i);
+            // Focus as well as hover, so this works from the keyboard too.
+            btn.addEventListener("mouseenter", () => highlight(i, null));
+            btn.addEventListener("focus", () => highlight(i, null));
+            btn.addEventListener("mouseleave", clear);
+            btn.addEventListener("blur", clear);
+        });
+
+        // Table view, matching the other panels: the chart is not the only
+        // way to read this, which is what keeps it accessible.
+        const table = document.createElement("details");
+        table.innerHTML = `<summary>Table view</summary>
+            <div class="table-scroll"><table class="data">
+              <thead><tr><th>Character</th><th class="num">Level</th><th class="num">Hours to get there</th><th class="num">Levels/hour</th></tr></thead>
+              <tbody>${ranked.map(s => {
+                  const last = s.points[s.points.length - 1];
+                  const hrs = (last.t - s.points[0].t) / 3600000;
+                  const gained = last.level - s.points[0].level;
+                  return `<tr><td>${escapeHtml(s.name)}</td><td class="num">${last.level}</td>
+                          <td class="num">${hrs.toFixed(1)}</td>
+                          <td class="num">${hrs > 0 ? (gained / hrs).toFixed(2) : "—"}</td></tr>`;
+              }).join("")}</tbody></table></div>`;
+        host.appendChild(table);
     }
 
     function renderRoster(players, staleAfter) {
