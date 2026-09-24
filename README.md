@@ -114,6 +114,20 @@ Professions, item level and AFK time all ride on `STATUS` rather than taking a l
 
 **Testing note worth keeping.** The addon's tests stub the server and the server's tests hand-write payloads, so both could pass while the two disagree about the wire format. `test_contract.py` in the scratchpad runs the real Lua through a stubbed client and posts whatever line it actually produces to a real server. It has already earned its place: it caught `%\s` written for `%s` in the `/ldb private` pattern, which matches a literal backslash and would have meant the command never fired.
 
+### Fixed 2026-09-24 &mdash; /ldb probe was being parsed as the event queue
+- [x] **The watcher read the probe report as queued events.** `parse_events()` located the queue with `file_text.find('["events"]')` &mdash; the *first* match in the saved file. `/ldb probe` wrote `report.events` (which events can be registered), and `["probe"]` sorts ahead of the real `["events"]` at the top level, so the probe's table won.
+
+  Visible in a live watcher log as `Skipping malformed queued payload: 'ok'` / `'TRADE_SKILL_UPDATE'` / `'REFUSED: ...'`. **The skipped junk was not the damage &mdash; `sent_count` was.** The bogus counts produced every `Event count went backwards` warning in that log, and a corrupted index can skip real events. Some events were probably lost this way between the probe shipping and this fix.
+
+  Fixed in both halves: the addon renamed the key to `eventRegistration` (the fix that matters immediately, since it needs no new watcher and testers already have the old `.exe`), and the parser is now anchored to the **top-level** `["events"]` rather than the first one anywhere. Verified against both the new file shape and the old one still in the wild.
+
+  **Worth remembering:** any future sub-table inside `LanDashboardDB` that shares a name with a top-level key can do this again. The watcher fix makes it harmless, but only once a rebuilt watcher is in players' hands.
+
+### Investigated 2026-09-24 &mdash; two watcher processes (not a bug)
+Task Manager shows two `savedvars_watcher.exe` entries. Checked rather than assumed: one is a child of the other (`explorer.exe` -> pid A -> pid B, created a second apart), which is PyInstaller's `--onefile` bootloader unpacking the bundle and running the real program as a child. Only the child runs the Python, so only one acquires the lock.
+
+The single-instance guard was tested live rather than read: with the real watcher running, a second process asking for the `Local\\LanDashboardWatcher` mutex was refused, which is the behaviour that stops two watchers ever sharing one `sent_count`. Noted on the setup page too, since a tester looking at Task Manager would reasonably think something was wrong.
+
 ### Reference 2026-09-24 &mdash; what this client actually exposes
 Measured with `/ldb probe` (addon v3.2.0) on `1.60.1 build 69977, toc 16001`. Recorded because this client is Classic's version numbering over retail's API surface, so neither lineage's assumptions can be carried over &mdash; and because one of ours was already wrong. Re-run the probe after any client patch; it is one command.
 

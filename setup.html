@@ -235,6 +235,10 @@
         <div>
             <h2>Troubleshooting</h2>
             <details>
+                <summary>Task Manager shows two copies of the watcher</summary>
+                <p>That's normal and it isn't running twice. The watcher is a single-file program, so launching it starts a small loader that unpacks it and then runs the real thing &mdash; you see both, one the parent of the other. Only one is doing any work. Starting it a second time on purpose is refused outright, so there is no way to end up with two genuinely running.</p>
+            </details>
+            <details>
                 <summary>I don't see the tray icon</summary>
                 <p>Windows tucks new tray icons under the <b>^</b> arrow at the right of the taskbar. Click it to find the gold <b>4L</b>, and drag it onto the taskbar if you want it always visible. Starting the watcher a second time does nothing except tell you it's already running.</p>
             </details>
