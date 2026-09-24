@@ -60,7 +60,14 @@
         /* Tables are the one thing allowed to be wider than the panel; they
            scroll inside their own box so the page itself never does. */
         .table-scroll { overflow-x: auto; }
-        table.data { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 980px; }
+        /* No blanket min-width. It was 980px on every table, which forced
+           the small ones -- 265 to 345px of actual content -- to scroll
+           sideways to reach empty space. Only the roster is genuinely wide,
+           and it carries its own floor below. */
+        table.data { width: 100%; border-collapse: collapse; font-size: 13px; }
+        /* Below this the fourteen columns stop being readable, so scrolling is
+           the honest outcome rather than crushing them. */
+        #roster { min-width: 1000px; }
         .prof { display: inline-flex; align-items: baseline; gap: 4px;
                 background-color: rgba(255,255,255,0.05); border-radius: 4px;
                 padding: 1px 6px; margin-right: 4px; font-size: 11px;
@@ -118,7 +125,11 @@
         summary { cursor: pointer; font-size: 12.5px; color: var(--text-muted); }
         summary:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2px; }
         .footnote { color: var(--text-muted); font-size: 12px; margin: 10px 0 0; }
-        .analytics { max-width: 980px; margin: 0 auto; }
+        /* 1140, not 980: the roster table needs 1007px for its fourteen
+           columns, and the panel's own padding takes 40 of whatever it sits
+           in. This leaves ~1100 inside a panel, so the roster fits without a
+           horizontal scrollbar and every panel still lines up on one width. */
+        .analytics { max-width: 1140px; margin: 0 auto; }
         @media (max-width: 520px) {
             .row-head { flex-direction: column; align-items: flex-start; gap: 2px; }
         }
@@ -161,12 +172,6 @@
         <h2>Where the quest XP comes from</h2>
         <p class="answers">Share of all quest XP by the size of the reward.</p>
         <div class="chart-scroll" id="bands"></div>
-    </div>
-
-    <div class="panel">
-        <h2>The hill ahead</h2>
-        <p class="answers">What each level costs, with the leading character's position marked.</p>
-        <div class="chart-scroll" id="levelCosts"></div>
     </div>
 
     <div class="panel">
@@ -292,70 +297,6 @@
             </svg>`;
     }
 
-    function renderLevelCosts(costs, players) {
-        const host = document.getElementById("levelCosts");
-        if (!costs.length) {
-            host.innerHTML = `<p class="empty">No level data yet.</p>`;
-            return;
-        }
-        const leader = players.length ? players[0] : null;
-        const max = Math.max(...costs.map(c => c.xp));
-        const baseY = 176, plotTop = 20, plotH = baseY - plotTop;
-        const slot = Math.min(72, Math.floor(580 / costs.length));
-        const barW = Math.min(24, Math.max(8, slot - 20));
-        const width = Math.max(320, costs.length * slot + 60);
-
-        const bars = costs.map((c, i) => {
-            const h = Math.max(2, (c.xp / max) * plotH);
-            const x = 56 + i * slot;
-            const y = baseY - h;
-            const isLeader = leader && c.level === leader.level;
-            if (isLeader) {
-                const fillH = Math.max(2, h * (leader.pct / 100));
-                return `
-                    <rect x="${x}" y="${y}" width="${barW}" height="${h}" rx="4" fill="#2a2a33"/>
-                    <rect x="${x}" y="${baseY - fillH}" width="${barW}" height="${fillH}" rx="4" fill="var(--accent-color)">
-                        <title>Level ${c.level}: ${fmt(c.xp)} XP to clear — ${escapeHtml(leader.name)} is ${leader.pct}% through</title>
-                    </rect>
-                    <text class="axis-text" x="${x + barW / 2}" y="${y - 6}" text-anchor="middle" fill="var(--accent-color)">${Math.round(leader.pct)}%</text>
-                    <text class="axis-text" x="${x + barW / 2}" y="196" text-anchor="middle" fill="var(--accent-color)">${c.level}</text>`;
-            }
-            return `
-                <rect x="${x}" y="${y}" width="${barW}" height="${h}" rx="4" fill="var(--s1)">
-                    <title>Level ${c.level}: ${fmt(c.xp)} XP to clear</title>
-                </rect>
-                <text class="axis-text" x="${x + barW / 2}" y="196" text-anchor="middle">${c.level}</text>`;
-        }).join("");
-
-        const ticks = [0, 0.25, 0.5, 0.75, 1].map(f => {
-            const y = baseY - f * plotH;
-            const value = Math.round((max * f) / 1000);
-            return `<line class="grid-line" x1="42" y1="${y}" x2="${width - 14}" y2="${y}"/>
-                    <text class="axis-text" x="36" y="${y + 4}" text-anchor="end">${f === 0 ? "0" : value + "k"}</text>`;
-        }).join("");
-
-        host.innerHTML = `
-            <svg viewBox="0 0 ${width} 214" role="img" aria-label="XP required for each level reached so far">
-                ${ticks}${bars}
-                <text class="axis-text" x="42" y="212">Level &rarr;</text>
-            </svg>`;
-    }
-
-    // Level over time, one line per character.
-    //
-    // Deliberately not a colour-per-character chart: the palette validator
-    // accepts only about four hues on this surface before pairs become
-    // indistinguishable, and a LAN has more characters than that. Cycling a
-    // short palette (what this did before) is worse than no colour at all --
-    // three characters shared each hue, so the legend could not be read. Here
-    // every line is recessive, the leader carries the accent, and hovering a
-    // line or a name brings it forward with a tooltip.
-    // Played time per level: the bar is the median across everyone who has
-    // finished that level, the dots are the individual runs.
-    //
-    // Median rather than mean on purpose -- one player who left the game
-    // running overnight at level 12 would drag a mean badly, and there are
-    // only a handful of characters for it to hide behind.
     function renderGrind(levelTimes, velocity) {
         const host = document.getElementById("grind");
         const names = Object.keys(levelTimes || {});
@@ -656,7 +597,6 @@
             renderKpis(data);
             renderComposition(data.players);
             renderBands(data.quest_bands);
-            renderLevelCosts(data.level_costs, data.players);
             renderGrind(data.level_times, data.velocity);
             renderVelocity(data.velocity, data.history);
             renderRoster(data.players, data.stale_after_seconds);
