@@ -384,6 +384,142 @@ LanFrame:SetScript("OnEvent", function(self, event, ...)
     end
 end)
 
+-- ---------------------------------------------------------------------------
+-- Profession API probe (/ldb probe)
+--
+-- Which profession API this client exposes is an open question: the .toc
+-- declares interface 16001, which matches neither Classic's 115xx nor
+-- retail's 11xxxx numbering, so this is a revamped client and may well use
+-- retail's GetProfessions() rather than Classic's skill list. This beta has
+-- already removed COMBAT_LOG_EVENT_UNFILTERED from addon access mid-project,
+-- so nothing below assumes a function exists, or that its return signature is
+-- what the documentation claims: every call goes through pcall and reports the
+-- failure instead of erroring the addon.
+--
+-- Results are written to LanDashboardDB.probe as well as printed, so they
+-- survive a /reload and can be read straight out of SavedVariables rather than
+-- transcribed out of a chat window by a tester.
+
+local PROBE_FUNCS = {
+    "GetProfessions", "GetProfessionInfo",                       -- retail path
+    "GetNumSkillLines", "GetSkillLineInfo", "ExpandSkillHeader",  -- classic path
+    "C_TradeSkillUI",                                            -- modern namespace
+}
+
+local PROBE_CHAT_LIMIT = 12
+
+local function probeRetail()
+    if not GetProfessions or not GetProfessionInfo then
+        return nil, "GetProfessions/GetProfessionInfo absent"
+    end
+    -- GetProfessions returns up to five values, any of which may be nil; a
+    -- table constructor drops the nils, and pairs skips the resulting holes.
+    local ok, indices = pcall(function() return { GetProfessions() } end)
+    if not ok then
+        return nil, "GetProfessions() errored: " .. tostring(indices)
+    end
+    local found = {}
+    for _, index in pairs(indices) do
+        local okInfo, name, _, rank, maxRank = pcall(GetProfessionInfo, index)
+        -- Insist on a string: a revamped client returning some other shape
+        -- should read as unreadable rather than be reported as a profession
+        -- literally named "42".
+        if okInfo and type(name) == "string" then
+            found[#found + 1] = string.format("%s %s/%s", tostring(name), tostring(rank), tostring(maxRank))
+        else
+            found[#found + 1] = string.format("index %s -> unreadable (%s)", tostring(index), tostring(name))
+        end
+    end
+    return found
+end
+
+local function probeClassic()
+    if not GetNumSkillLines or not GetSkillLineInfo then
+        return nil, "GetNumSkillLines/GetSkillLineInfo absent"
+    end
+    -- A collapsed header hides its children from the index list entirely, so
+    -- anything that enumerates without expanding first silently misses the
+    -- professions it is looking for.
+    if ExpandSkillHeader then
+        pcall(ExpandSkillHeader, 0)
+    end
+    local okCount, count = pcall(GetNumSkillLines)
+    if not okCount then
+        return nil, "GetNumSkillLines() errored: " .. tostring(count)
+    end
+    -- Distinct from the above on purpose: "it threw" and "it answered with
+    -- something that isn't a count" mean different things when diagnosing a
+    -- client we can't inspect directly.
+    if type(count) ~= "number" then
+        return nil, "GetNumSkillLines() returned " .. type(count) .. ", not a number"
+    end
+    -- Each entry is recorded with the header it sits under, because that is
+    -- what decides whether professions can be told apart from weapon skills,
+    -- languages and riding -- the real risk with this path.
+    local found = {}
+    local header = "(none)"
+    for i = 1, count do
+        local ok, name, isHeader, _, rank, _, _, maxRank = pcall(GetSkillLineInfo, i)
+        if ok and type(name) == "string" then
+            if isHeader then
+                header = tostring(name)
+            else
+                found[#found + 1] = string.format("[%s] %s %s/%s",
+                    header, tostring(name), tostring(rank), tostring(maxRank))
+            end
+        end
+    end
+    return found
+end
+
+local function reportSection(label, found, err)
+    if not found then
+        print(string.format("|cffe8a33d  %s:|r unavailable -- %s", label, tostring(err)))
+        return
+    end
+    print(string.format("|cffe8a33d  %s:|r %d entries", label, #found))
+    for i = 1, math.min(#found, PROBE_CHAT_LIMIT) do
+        print("    " .. found[i])
+    end
+    if #found > PROBE_CHAT_LIMIT then
+        print(string.format("    ... and %d more (full list in SavedVariables)", #found - PROBE_CHAT_LIMIT))
+    end
+end
+
+local function runProbe()
+    local report = { addon = "3.1.0" }
+    report.when = (date and date("%Y-%m-%d %H:%M:%S")) or tostring(time and time() or "?")
+
+    local okBuild, version, build, buildDate, tocVersion = pcall(GetBuildInfo)
+    if okBuild then
+        report.client = string.format("%s build %s (%s) toc %s",
+            tostring(version), tostring(build), tostring(buildDate), tostring(tocVersion))
+    else
+        report.client = "GetBuildInfo() errored: " .. tostring(version)
+    end
+
+    report.present = {}
+    for _, name in ipairs(PROBE_FUNCS) do
+        report.present[name] = (_G[name] ~= nil)
+    end
+
+    report.retail, report.retailError = probeRetail()
+    report.classic, report.classicError = probeClassic()
+    LanDashboardDB.probe = report
+
+    local present = {}
+    for _, name in ipairs(PROBE_FUNCS) do
+        present[#present + 1] = name .. "=" .. tostring(report.present[name])
+    end
+
+    print("|cffe8a33d[LAN Dashboard] Profession API probe|r")
+    print("  client: " .. report.client)
+    print("  present: " .. table.concat(present, " "))
+    reportSection("retail GetProfessions()", report.retail, report.retailError)
+    reportSection("classic skill list", report.classic, report.classicError)
+    print("|cffe8a33d  Saved to LanDashboardDB.probe -- type /reload, then send me the probe block from SavedVariables.|r")
+end
+
 SLASH_LANDASHBOARD1 = "/ldb"
 SlashCmdList["LANDASHBOARD"] = function(msg)
     if msg == "sync" then
@@ -394,6 +530,10 @@ SlashCmdList["LANDASHBOARD"] = function(msg)
     if msg == "verbose" then
         LDB_VERBOSE = not LDB_VERBOSE
         print(string.format("|cffe8a33d[LAN Dashboard] Event echo %s.|r", LDB_VERBOSE and "ON — every recorded event will print here" or "off"))
+        return
+    end
+    if msg == "probe" then
+        runProbe()
         return
     end
     if msg == "forget" then
@@ -408,4 +548,4 @@ SlashCmdList["LANDASHBOARD"] = function(msg)
     ))
 end
 
-print("|cffcd7f32LAN Dashboard v3.0.0 Initialized! Type /ldb to check reload-trigger status, /ldb sync to test the sync button.|r")
+print("|cffcd7f32LAN Dashboard v3.1.0 Initialized! Type /ldb to check reload-trigger status, /ldb sync to test the sync button, /ldb probe to report this client's profession API.|r")
