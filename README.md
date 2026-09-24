@@ -100,6 +100,20 @@ Reported from real play on the restyled dashboard. Diagnoses noted where already
 
   **Fix, with one subtlety:** raise the basis to ~360px, but make it `flex: 0 1 360px` rather than `0 0 360px`. A non-shrinking 360px block plus the bar's 150px floor overflows a phone-width row; allowing shrink lets it give the space back when there isn't any, with the ellipsis still there as the last resort. This does **not** reintroduce the ragged-bar problem that the fixed basis was added to solve &mdash; flex shrink is proportional to basis, and every row's who-block has the same basis, so they all resolve to the same width and the bars still start at a common x. Worth re-checking the bar alignment after the change anyway, since that's the property being traded against.
 
+### Shipped 2026-09-24 &mdash; the STATUS tail
+Professions, item level and AFK time all ride on `STATUS` rather than taking a log type each. Server first (`7f1ded8`), then addon v3.3.0 (`da1ea09`), then the display.
+
+**No new watcher.** Verified rather than assumed: the shipped `.exe` forwards every shape of the new payload (full tail, withheld field, empty profession list, and the old six-field form) and still rejects a truncated line. Testers do not need to re-download anything.
+
+**Three things that are easy to get wrong here**, each now covered by a test:
+- **The trailing comma after the AFK field is load-bearing.** It makes the profession list *present but empty*, which reads as "this character has none". Without it the field is *absent*, which means "an older addon that cannot report professions" &mdash; so the server would keep stale professions forever.
+- **Profession names are stripped of commas and colons before sending.** Those are the payload's own separators. A name carrying one would make the line unparseable, the server would reject it, and the event would be **destroyed**, because the watcher's `sent_count` has already advanced past it.
+- **Item level takes the second return of `GetAverageItemLevel`** (equipped), not the first (overall). Overall counts upgrades being carried rather than worn.
+
+**Known gap:** the slot number is not carried, only the order, so primaries and secondaries are not distinguishable on the page &mdash; they render as one list. Adding `:slot` to each profession field would fix it and is safe by the same reasoning as everything else here.
+
+**Testing note worth keeping.** The addon's tests stub the server and the server's tests hand-write payloads, so both could pass while the two disagree about the wire format. `test_contract.py` in the scratchpad runs the real Lua through a stubbed client and posts whatever line it actually produces to a real server. It has already earned its place: it caught `%\s` written for `%s` in the `/ldb private` pattern, which matches a literal backslash and would have meant the command never fired.
+
 ### Reference 2026-09-24 &mdash; what this client actually exposes
 Measured with `/ldb probe` (addon v3.2.0) on `1.60.1 build 69977, toc 16001`. Recorded because this client is Classic's version numbering over retail's API surface, so neither lineage's assumptions can be carried over &mdash; and because one of ours was already wrong. Re-run the probe after any client patch; it is one command.
 
@@ -112,7 +126,7 @@ Measured with `/ldb probe` (addon v3.2.0) on `1.60.1 build 69977, toc 16001`. Re
 **Ruled out &mdash; achievements and statistics.** `GetStatistic(60)` returned `" | false | 60"` and `GetAchievementInfo(60)` returned nothing. The probe alone could not distinguish "wrong id" from "not implemented", but achievements are not expected to exist in this game mode at all, so the stub-shaped returns are the API being vestigial rather than mis-called. **Consequence:** there is no shortcut for the "more data points" items &mdash; total deaths, quests completed and similar have to be counted by the addon and accumulated server-side, which is what the existing `DEATH` and `QUEST` events already do. Do not spend time hunting for a working achievement id.
 
 ### Logged 2026-09-24 &mdash; average item level
-- [ ] **Show average item level.** Surfaced by the API sweep rather than asked for, and worth having: `GetAverageItemLevel()` is present and returned `12.5 | 12.5 | 12.5` at level 18. A gear number alongside level and played time says something the XP bar does not &mdash; two characters at the same level are not necessarily equally equipped, and in a levelling race that is a genuinely different story.
+- [x] **Show average item level.** *(Done 2026-09-24. Equipped, not overall -- confirmed by a contract test that gives the two different values. On the Big screen it sits under the level number rather than in the meta line, which had only just been widened to stop truncating.)* Surfaced by the API sweep rather than asked for, and worth having: `GetAverageItemLevel()` is present and returned `12.5 | 12.5 | 12.5` at level 18. A gear number alongside level and played time says something the XP bar does not &mdash; two characters at the same level are not necessarily equally equipped, and in a levelling race that is a genuinely different story.
 
   **Which of the three returns.** Retail's signature is `overall, equipped, pvp`; all three matched here because the character had nothing in its bags worth wearing. They will diverge, and **equipped is the honest one** for a dashboard &mdash; overall counts gear the player is carrying but not using, which would flatter someone hoarding upgrades they have not put on. Confirm the position rather than assuming retail's order, exactly as the profession slots had to be.
 
@@ -125,7 +139,7 @@ Measured with `/ldb probe` (addon v3.2.0) on `1.60.1 build 69977, toc 16001`. Re
 ### Logged 2026-09-24 &mdash; beta tester feedback
 Raised by real testers after the first proper influx. Ordered smallest to largest.
 
-- [ ] **Let players opt out of sharing a field, starting with gold.** Someone does not want their gold on a public board, which is fair &mdash; and the dashboard is public by design. Build it as a general opt-out set rather than a gold-specific flag, since more fields will want this (`LanDashboardDB.private = { gold = true }`, toggled with something like `/ldb private gold`). Account-wide is the right default; gold is per-character but "do not share my gold" is a per-*person* wish.
+- [x] **Let players opt out of sharing a field, starting with gold.** *(Done 2026-09-24: server first in one deploy, then addon v3.3.0 with `/ldb private gold`. A withheld field renders as "private", not as the em dash that means "no data yet".)* Someone does not want their gold on a public board, which is fair &mdash; and the dashboard is public by design. Build it as a general opt-out set rather than a gold-specific flag, since more fields will want this (`LanDashboardDB.private = { gold = true }`, toggled with something like `/ldb private gold`). Account-wide is the right default; gold is per-character but "do not share my gold" is a per-*person* wish.
 
   **The encoding is the hard part, and it is a deploy hazard.** `STATUS` is positional (`level,current_xp,max_xp,gold,played_total,played_level`), so a field cannot simply be dropped without shifting everything after it. Both obvious encodings are rejected by the *current* server, and rejection here is not harmless &mdash; a refused event advances `sent_count` and is **destroyed permanently**:
   - an empty field (`...,max_xp,,played_total,...`) hits `int("")` at `main.py:488` and raises;
@@ -137,7 +151,7 @@ Raised by real testers after the first proper influx. Ordered smallest to larges
 
   **UI:** withheld is not the same as missing. The dashboard currently shows an em dash for "no data yet"; a deliberately private field should read differently (a lock glyph, or "private") so nobody reads a hidden value as a broken watcher.
 
-- [ ] **Track professions.** A natural fit for the roster and analytics pages, and a real part of the levelling story.
+- [x] **Track professions.** *(Done 2026-09-24, addon v3.3.0, carried on the `STATUS` tail as designed below.)* A natural fit for the roster and analytics pages, and a real part of the levelling story.
 
   **API settled by measurement, not assumption (2026-09-24, `/ldb probe` v3.1.0).** The client reports `1.60.1 build 69977 toc 16001` -- Classic's *version numbering* with retail's *API surface*, which is why neither lineage's habits transfer. Present: `GetProfessions`, `GetProfessionInfo`, `C_TradeSkillUI`. **Absent: `GetNumSkillLines`, `GetSkillLineInfo`, `ExpandSkillHeader`** -- the entire Classic skill-list path this item originally proposed does not exist here. Live return on a real character: `Herbalism 71/150`, `Tailoring 103/150`, `First Aid 1/75`, `Cooking 1/75`.
 
@@ -183,7 +197,7 @@ Raised by real testers after the first proper influx. Ordered smallest to larges
   **Two constraints to design against.** With a handful of characters, small multiples beat one crowded multi-series chart &mdash; and the dashboard's own audience is a projector at a LAN, so legibility at distance matters more than density. And **class colours must not be used as chart marks**: they were measured against each other earlier in this project and fail CVD separation (several WoW class colours are indistinguishable to a colourblind viewer, and some are too close even in full colour). They're fine as *text* labels, which is how the ladder already uses them. A chart with more than one series takes a validated categorical palette for its lines and puts the class colour on the label beside it. Also no dual-axis charts &mdash; gold and XP on one plot means two charts or an indexed common base.
 
 ### Logged 2026-09-23 &mdash; AFK time
-- [ ] **Track how long a character has spent AFK.** A "time spent standing in Ironforge" number alongside `/played` &mdash; a journey stat, not a moderation one.
+- [x] **Track how long a character has spent AFK.** *(Done 2026-09-24, addon v3.3.0. Shown on the hero card and the analytics roster, labelled as addon-measured.)* A "time spent standing in Ironforge" number alongside `/played` &mdash; a journey stat, not a moderation one.
 
   **Signal (confirmed available, 2026-09-24 sweep: event registers, `UnitIsAFK("player")` returns a real value):** `PLAYER_FLAGS_CHANGED` (registered for `player`) fires on every AFK transition, and `UnitIsAFK("player")` reads the current state. That covers both `/afk` and the client's own auto-AFK, which is the majority of it; there's no polling and no timer. Accumulate the elapsed seconds into `LanDashboardDB` on the *leaving*-AFK edge, and flush any open interval at logout so a session that ends while AFK still counts.
 

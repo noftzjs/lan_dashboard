@@ -60,7 +60,12 @@
         /* Tables are the one thing allowed to be wider than the panel; they
            scroll inside their own box so the page itself never does. */
         .table-scroll { overflow-x: auto; }
-        table.data { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 690px; }
+        table.data { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 980px; }
+        .prof { display: inline-flex; align-items: baseline; gap: 4px;
+                background-color: rgba(255,255,255,0.05); border-radius: 4px;
+                padding: 1px 6px; margin-right: 4px; font-size: 11px;
+                color: var(--text-muted); white-space: nowrap; }
+        .prof b { color: var(--text-color); font-weight: 600; font-variant-numeric: tabular-nums; }
         table.data th, table.data td { text-align: left; padding: 7px 10px 7px 0; border-bottom: 1px solid var(--border-color); }
         table.data th { color: var(--text-muted); font-weight: 500; font-size: 12px; cursor: default; }
         table.data td.num, table.data th.num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -340,7 +345,9 @@
                 <th>Character</th><th>Class</th><th>Faction</th>
                 <th class="num">Level</th><th class="num">Progress</th>
                 <th class="num">Quests</th><th class="num">Deaths</th>
-                <th class="num">Gold</th><th class="num">Played</th><th>Zone</th><th>Status</th>
+                <th class="num">Gold</th><th class="num">Played</th>
+                <th class="num">ilvl</th><th class="num">AFK</th><th>Professions</th>
+                <th>Zone</th><th>Status</th>
             </tr></thead>
             <tbody>${players.map(p => {
                 const idle = p.idle_seconds === null || p.idle_seconds > staleAfter;
@@ -354,6 +361,9 @@
                     <td class="num">${fmt(p.deaths)}</td>
                     <td class="num" title="${escapeHtml(goldTitle(p))}">${goldHtml(p)}</td>
                     <td class="num">${formatPlayed(p.played_total)}</td>
+                    <td class="num">${formatItemLevel(p)}</td>
+                    <td class="num" title="Addon-measured, and only since it was installed">${p.afk_total ? formatPlayed(p.afk_total) : "—"}</td>
+                    <td title="${escapeHtml(professionsText(p))}">${professionsHtml(p)}</td>
                     <td>${escapeHtml(p.zone || "—")}</td>
                     <td>${idle ? "Idle" : "Active"}</td>
                 </tr>`;

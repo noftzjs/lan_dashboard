@@ -188,3 +188,22 @@ def test_an_absurd_number_of_professions_is_refused(build_server):
     _, client = build_server()
     many = ",".join(f"Prof{i}:1:75" for i in range(11))
     rejected(client, status(tail=f"12.5,0,{many}"))
+
+
+# --- the analytics page reads these too ---------------------------------------
+
+def test_the_analytics_payload_carries_the_tail_and_privacy(build_server):
+    """The analytics endpoint builds its rows field by field rather than
+    spreading state, so a new field is invisible there until it is added by
+    hand -- which has already caused one round of em dashes on that page, and
+    would silently turn a withheld gold value back into "no data yet"."""
+    _, client = build_server()
+    accepted(client, status(gold="", tail="12.5,900," + PROFS))
+
+    row = next(p for p in client.get(
+        "/api/analytics", auth=("admin", "testpass")).json()["players"]
+        if p["name"] == "Ayla")
+    assert row["item_level"] == 12.5
+    assert row["afk_total"] == 900
+    assert [p["name"] for p in row["professions"]] == ["Herbalism", "Tailoring", "First Aid"]
+    assert row["private_fields"] == ["gold"]

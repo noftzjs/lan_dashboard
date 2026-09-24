@@ -257,6 +257,32 @@ function exactGold(copper) {
         + ` (${copper.toLocaleString()} copper)`;
 }
 
+// Item level is a float (12.5 at level 18), so it keeps one decimal -- the
+// half point is real and rounding it away would flatten characters that are
+// genuinely a tier apart at low level.
+function formatItemLevel(player) {
+    if (isWithheld(player, "item_level")) return "private";
+    if (player.item_level === null || player.item_level === undefined) return "\u2014";
+    return player.item_level.toFixed(1);
+}
+
+// Professions arrive in slot order with empty slots dropped. The slot itself
+// isn't carried, so primaries and secondaries aren't distinguishable here --
+// they're shown as one list rather than guessing from position.
+function professionsText(player) {
+    const list = player.professions || [];
+    if (!list.length) return "";
+    return list.map(p => `${p.name} ${p.rank}/${p.max_rank}`).join(", ");
+}
+
+function professionsHtml(player) {
+    const list = player.professions || [];
+    if (!list.length) return `<span class="csub">\u2014</span>`;
+    return list
+        .map(p => `<span class="prof">${escapeHtml(p.name)}<b>${p.rank}</b></span>`)
+        .join("");
+}
+
 // Playtime can run to days over a LAN weekend, so the unit shifts rather
 // than printing an unreadable hour count.
 function formatPlayed(seconds) {

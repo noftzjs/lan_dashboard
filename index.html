@@ -157,7 +157,26 @@
         .big-row .who-block .name, .big-row .who-block .meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .big-row .name { font-size: 19px; font-weight: 700; display: flex; align-items: center; gap: 8px; overflow-wrap: anywhere; }
         .big-row .meta { font-size: 12px; color: var(--text-muted); }
-        .big-row .lvl { font-size: 24px; font-weight: 800; margin-left: auto; font-variant-numeric: tabular-nums; }
+        /* The level and item level share the right-hand block. Item level
+           deliberately does NOT join the meta line: that line was truncating
+           at five items and has only just been widened to fit them. */
+        /* min-height reserves the item-level line whether or not this
+           character reports one. Without it a row from an addon too old to
+           send item level is ~11px shorter than its neighbours, and during a
+           rollout -- when some testers have updated and some have not -- the
+           pack reads as ragged -- so the line is always rendered, showing an
+           em dash when this character has not reported one. That also quietly
+           tells you which players are still on an older addon. */
+        .big-row .lvl-block { margin-left: auto; text-align: right; flex: none; min-width: 52px; }
+        .big-row .lvl { font-size: 24px; font-weight: 800; font-variant-numeric: tabular-nums; display: block; }
+        .big-row .ilvl { font-size: 10.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; letter-spacing: 0.04em; }
+        .prof {
+            display: inline-flex; align-items: baseline; gap: 4px;
+            background-color: rgba(255,255,255,0.05); border-radius: 4px;
+            padding: 1px 6px; margin-right: 4px; font-size: 11px;
+            color: var(--text-muted); white-space: nowrap;
+        }
+        .prof b { color: var(--text-color); font-weight: 600; font-variant-numeric: tabular-nums; }
         .big-row .barwrap { flex: 1 1 200px; min-width: 150px; }
         .big-row .pct { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; margin-top: 4px; }
         .big-bar { height: 7px; background-color: #24242c; border-radius: 4px; overflow: hidden; }
@@ -387,7 +406,13 @@
             player.current_zone ? escapeHtml(player.current_zone) : "",
             hasGoldToShow(player) ? `<span class="gold" title="${escapeHtml(goldTitle(player))}">${goldHtml(player)}</span>` : "",
             player.played_total ? `${formatPlayed(player.played_total)} played` : "",
+            player.item_level != null ? `ilvl ${formatItemLevel(player)}` : "",
+            player.afk_total ? `${formatPlayed(player.afk_total)} afk` : "",
         ].filter(Boolean).join(" · ");
+        // Only when there are any: professionsHtml() renders an em dash for
+        // an empty list, which is right in a table column but reads as a
+        // missing value on the hero card.
+        const heroProfessions = (player.professions || []).length ? professionsHtml(player) : "";
         const heroTags = tagChipsHtml(player);
         return `
             <div class="hero" id="${playerElementId("hero", player.name)}">
@@ -395,6 +420,7 @@
                     <div class="crown">★ Leader</div>
                     <div class="who" style="color:${classColor}">${escapeHtml(player.name)}${streamBadgesHtml(player)}</div>
                     <div class="meta">${meta || "No profile data yet"}</div>
+                    ${heroProfessions ? `<div style="margin-top:8px">${heroProfessions}</div>` : ""}
                     ${heroTags ? `<div class="tag-row" style="margin-top:8px">${heroTags}</div>` : ""}
                 </div>
                 <div class="right">
@@ -429,7 +455,10 @@
                     <div class="big-bar"><i style="width:${player.pct}%"></i></div>
                     <div class="pct">${isMaxLevel(player) ? `Level ${player.level} · at the cap` : `${player.pct}% of level ${player.level}`}</div>
                 </div>
-                <span class="lvl">${player.level}</span>
+                <div class="lvl-block">
+                    <span class="lvl">${player.level}</span>
+                    <span class="ilvl" title="Average equipped item level">ilvl ${formatItemLevel(player)}</span>
+                </div>
             </div>`;
     }
 

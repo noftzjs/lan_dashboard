@@ -1055,6 +1055,13 @@ async def get_analytics(_user: str = Depends(require_roster_auth)):
             "gold": state.get("gold"),           # copper; None until a STATUS arrives
             "played_total": state.get("played_total"),
             "played_level": state.get("played_level"),
+            # private_fields has to travel with gold: without it this page
+            # renders a withheld value as the same em dash it uses for "no
+            # data yet", which is exactly the confusion it exists to prevent.
+            "private_fields": state.get("private_fields", []),
+            "item_level": state.get("item_level"),
+            "afk_total": state.get("afk_total"),
+            "professions": state.get("professions", []),
             "zone": state.get("current_zone"),
             "idle_seconds": idle_seconds(state),
             "quests": quest_count.get(name, 0),
