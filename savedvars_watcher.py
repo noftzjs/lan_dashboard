@@ -296,7 +296,30 @@ def parse_events(file_text):
     `["events"] = { ... }` block. Returns [] if the block can't be found
     (e.g. the file was caught mid-write, or the addon hasn't queued
     anything yet)."""
-    start = file_text.find('["events"]')
+    # Anchored to the TOP-LEVEL ["events"], not simply the first one in the
+    # file. Any nested table with that key would otherwise win -- which is
+    # exactly what happened when /ldb probe added a report.events sub-table:
+    # ["probe"] sorts ahead of ["events"], so the watcher parsed probe results
+    # as queued events and corrupted its own sent_count.
+    root = file_text.find("LanDashboardDB")
+    if root == -1:
+        return []
+    root_brace = file_text.find("{", root)
+    if root_brace == -1:
+        return []
+
+    start, depth = -1, 0
+    for i in range(root_brace, len(file_text)):
+        char = file_text[i]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        elif depth == 1 and file_text.startswith('["events"]', i):
+            start = i
+            break
     if start == -1:
         return []
     brace_start = file_text.find("{", start)

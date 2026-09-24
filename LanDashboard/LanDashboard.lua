@@ -18,6 +18,7 @@ LanFrame:RegisterEvent("TIME_PLAYED_MSG")       -- The reply to RequestTimePlaye
 -- support it fine, so this could come back behind a client-version check
 -- if this addon ever needs to run on both. For now, kill-based scoring is
 -- unavailable; quest and level-up weights carry the reload-trigger system.
+LanFrame:RegisterEvent("ADDON_LOADED")          -- The point SavedVariables are guaranteed restored
 LanFrame:RegisterEvent("PLAYER_CONTROL_LOST")   -- Fires when a flight path departs — a safe reload window
 LanFrame:RegisterEvent("PLAYER_FLAGS_CHANGED")  -- Fires on AFK toggle — another safe reload window
 -- Closes an open AFK interval on the way out. pcall'd rather than registered
@@ -40,7 +41,53 @@ local currentZone = ""
 -- has already read. nextId only ever grows; a watcher tracks the highest
 -- index it's already forwarded and only sends what's new past that.
 --============================================================
-LanDashboardDB = LanDashboardDB or { events = {}, nextId = 1 }
+-- Defaults are applied twice, and that is deliberate.
+--
+-- Saved state has looked unreliable on this client (2026-09-24): nextId at 1
+-- after days of play, an empty known-character ledger, an AFK total present in
+-- one save and gone from the next. Most of the surrounding noise turned out to
+-- be a different bug -- the watcher was parsing /ldb probe's report as the
+-- event queue -- so this is NOT a confirmed diagnosis of the remainder.
+--
+-- Doing it in both places is cheap insurance either way. ADDON_LOADED is the
+-- point the platform guarantees saved globals are in place, and initialising
+-- there is the documented-safe pattern regardless of what this client does at
+-- file scope. Whichever order applies, one call is the real one and the other
+-- is a no-op: every assignment is an `or` that keeps an existing value.
+--
+-- So the same defaults are applied again at ADDON_LOADED, where the saved
+-- globals are guaranteed to be in place. Whichever order this client actually
+-- uses, one call is the real one and the other is a no-op: every assignment is
+-- an `or` that keeps an existing value, so neither can clobber the other.
+function LDB_ApplySavedDefaults()
+    LanDashboardDB = LanDashboardDB or {}
+    LanDashboardDB.events = LanDashboardDB.events or {}
+    LanDashboardDB.nextId = LanDashboardDB.nextId or 1
+    LanDashboardDB.known = LanDashboardDB.known or {}
+    LanDashboardDB.private = LanDashboardDB.private or {}
+    LanDashboardDB.defaults = LanDashboardDB.defaults or {}
+
+    -- Sharing gold is opt-in rather than opt-out: it is the one figure testers
+    -- actually asked to keep private, so the safe state is the default and a
+    -- player chooses to reveal it. Applied once per install and then
+    -- remembered, so someone who switches it on does not find it off again at
+    -- the next login.
+    if not LanDashboardDB.defaults.goldOptIn then
+        LanDashboardDB.defaults.goldOptIn = true
+        if LanDashboardDB.private.gold == nil then
+            LanDashboardDB.private.gold = true
+        end
+    end
+
+    LDB_VERBOSE = LDB_VERBOSE or false
+    LDB_AUTO_SYNC_ON_LOGIN = LDB_AUTO_SYNC_ON_LOGIN or false
+    LDB_WEIGHT_QUEST = LDB_WEIGHT_QUEST or 3
+    LDB_WEIGHT_LEVEL = LDB_WEIGHT_LEVEL or 5
+    LDB_FLUSH_THRESHOLD = LDB_FLUSH_THRESHOLD or 10
+    LDB_ESCALATE_THRESHOLD = LDB_ESCALATE_THRESHOLD or 18
+end
+
+LDB_ApplySavedDefaults()
 
 -- Characters this addon has already queued a PROFILE for (name -> true). Lets
 -- the login sync prompt fire only the first time a character is ever seen
@@ -49,7 +96,7 @@ LanDashboardDB = LanDashboardDB or { events = {}, nextId = 1 }
 -- added to older saved tables that predate it. Clear with  /ldb forget
 -- (e.g. after pointing the server at a fresh DB_FILE, when everyone needs to
 -- register again).
-LanDashboardDB.known = LanDashboardDB.known or {}
+-- (applied by LDB_ApplySavedDefaults, at load and again at ADDON_LOADED)
 
 -- Debug echo, off by default: every queued event printed to chat. This used
 -- to be how the data actually left the game (the watcher read the chat log),
@@ -57,7 +104,7 @@ LanDashboardDB.known = LanDashboardDB.known or {}
 -- is just noise: PLAYER_XP_UPDATE alone fires on every mob kill and quest
 -- reward, which floods the chat frame during normal play. Turn it back on
 -- with /ldb verbose when diagnosing what the addon is or isn't recording.
-LDB_VERBOSE = LDB_VERBOSE or false
+-- LDB_VERBOSE default: see LDB_ApplySavedDefaults
 
 -- The realm's clock, not the player's PC clock: every player's events then sit
 -- on one shared timeline even if their machines disagree, which is what makes
@@ -98,17 +145,19 @@ end
 --============================================================
 -- LDB_WEIGHT_KILL removed: kill-based scoring needed COMBAT_LOG_EVENT_UNFILTERED,
 -- which is unavailable on this client (see the registration comment above).
-LDB_WEIGHT_QUEST = LDB_WEIGHT_QUEST or 3        -- score added per quest turned in
-LDB_WEIGHT_LEVEL = LDB_WEIGHT_LEVEL or 5        -- score added per level-up
-LDB_FLUSH_THRESHOLD = LDB_FLUSH_THRESHOLD or 10     -- a safe window reloads once score >= this
-LDB_ESCALATE_THRESHOLD = LDB_ESCALATE_THRESHOLD or 18 -- suggest a manual /reload if score reaches this with no safe window taken
+-- Tuning knobs, defaulted in LDB_ApplySavedDefaults:
+--   LDB_WEIGHT_QUEST       score added per quest turned in
+--   LDB_WEIGHT_LEVEL       score added per level-up
+--   LDB_FLUSH_THRESHOLD    a safe window reloads once score >= this
+--   LDB_ESCALATE_THRESHOLD suggest a manual /reload if score reaches this
+--                          with no safe window taken
 -- EXPERIMENTAL, off by default: also try to reload by itself a few seconds
 -- after a fresh login so a character reaches the dashboard with zero clicks.
 -- Untested on this client — if the addon isn't allowed to call ReloadUI()
 -- there, it throws ADDON_ACTION_BLOCKED (the sync button still appears as the
 -- fallback). Try it with  /run LDB_AUTO_SYNC_ON_LOGIN = true  and turn it back
 -- off the same way if BugSack shows that error.
-LDB_AUTO_SYNC_ON_LOGIN = LDB_AUTO_SYNC_ON_LOGIN or false
+-- LDB_AUTO_SYNC_ON_LOGIN default: see LDB_ApplySavedDefaults
 
 -- Session-only scoring state — deliberately NOT saved, so it resets to 0
 -- exactly when a reload actually happens (that reload IS the flush).
@@ -491,6 +540,14 @@ LanFrame:SetScript("OnEvent", function(self, event, ...)
 
     -- 4. RELOAD-TRIGGER SAFE WINDOWS (kill-based scoring removed — see the
     -- COMBAT_LOG_EVENT_UNFILTERED registration comment above)
+    elseif event == "ADDON_LOADED" then
+        -- Fires for every addon that loads, so check it is ours first. Read
+        -- from varargs, the same way every other branch here does.
+        local loadedAddon = ...
+        if loadedAddon == "LanDashboard" then
+            LDB_ApplySavedDefaults()
+        end
+
     elseif event == "PLAYER_CONTROL_LOST" then
         tryFlush("flight path")
 
@@ -774,7 +831,7 @@ local function reportSection(label, found, err)
 end
 
 local function runProbe()
-    local report = { addon = "3.4.0" }
+    local report = { addon = "3.5.0" }
     report.when = (date and date("%Y-%m-%d %H:%M:%S")) or tostring(time and time() or "?")
 
     local okBuild, version, build, buildDate, tocVersion = pcall(GetBuildInfo)
@@ -803,7 +860,10 @@ local function runProbe()
     for _, entry in ipairs(PROBE_NAMESPACES) do
         report.namespaces[entry[1]] = namespaceInfo(entry[1], entry[2])
     end
-    report.events = probeEvents()
+    -- NOT "events": the watcher finds the queue by searching for the first
+    -- ["events"] in the saved file, and ["probe"] sorts ahead of the real
+    -- ["events"] -- so a key by that name here gets parsed as the event queue.
+    report.eventRegistration = probeEvents()
 
     LanDashboardDB.probe = report
 
@@ -830,7 +890,7 @@ local function runProbe()
 
     local refused = {}
     for _, event in ipairs(PROBE_EVENTS) do
-        if report.events[event] ~= "ok" then
+        if report.eventRegistration[event] ~= "ok" then
             refused[#refused + 1] = event
         end
     end
@@ -960,7 +1020,7 @@ local function buildConfigFrame()
 
     local version = f:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
     version:SetPoint("LEFT", title, "RIGHT", 6, -1)
-    version:SetText("v3.4.0")
+    version:SetText("v3.5.0")
 
     local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -2, -2)
@@ -1096,4 +1156,4 @@ SlashCmdList["LANDASHBOARD"] = function(msg)
     ))
 end
 
-print("|cffcd7f32LAN Dashboard v3.4.0 loaded. Type /ldb to open settings.|r")
+print("|cffcd7f32LAN Dashboard v3.5.0 loaded. Type /ldb to open settings.|r")
