@@ -105,7 +105,18 @@ Measured with `/ldb probe` (addon v3.2.0) on `1.60.1 build 69977, toc 16001`. Re
 
 **Events:** 13 of 14 registered. The exception is `TRADE_SKILL_UPDATE`, which is refused as an *unknown event* &mdash; it does not exist here. Note `SKILL_LINES_CHANGED` **does** register even though `GetNumSkillLines`/`GetSkillLineInfo` do not exist, so the event outlived its companion getters; it is still usable as a "professions changed" trigger, queried through `GetProfessions`. `COMBAT_LOG_EVENT_UNFILTERED` was deliberately not probed: it is known removed, and registering a forbidden event raises the `ADDON_ACTION_FORBIDDEN` dialog that broke the addon before.
 
-**Inconclusive, do not read as absent:** `GetStatistic(60)` returned `" | false | 60"` and `GetAchievementInfo(60)` returned nothing. Both were probed with an arbitrary id, so this says the id was wrong, not that the statistics API is unusable. If the "more data points" items (total deaths, quests completed) are worth shortcutting, re-probe with a real achievement id before writing that tracking by hand.
+**Ruled out &mdash; achievements and statistics.** `GetStatistic(60)` returned `" | false | 60"` and `GetAchievementInfo(60)` returned nothing. The probe alone could not distinguish "wrong id" from "not implemented", but achievements are not expected to exist in this game mode at all, so the stub-shaped returns are the API being vestigial rather than mis-called. **Consequence:** there is no shortcut for the "more data points" items &mdash; total deaths, quests completed and similar have to be counted by the addon and accumulated server-side, which is what the existing `DEATH` and `QUEST` events already do. Do not spend time hunting for a working achievement id.
+
+### Logged 2026-09-24 &mdash; average item level
+- [ ] **Show average item level.** Surfaced by the API sweep rather than asked for, and worth having: `GetAverageItemLevel()` is present and returned `12.5 | 12.5 | 12.5` at level 18. A gear number alongside level and played time says something the XP bar does not &mdash; two characters at the same level are not necessarily equally equipped, and in a levelling race that is a genuinely different story.
+
+  **Which of the three returns.** Retail's signature is `overall, equipped, pvp`; all three matched here because the character had nothing in its bags worth wearing. They will diverge, and **equipped is the honest one** for a dashboard &mdash; overall counts gear the player is carrying but not using, which would flatter someone hoarding upgrades they have not put on. Confirm the position rather than assuming retail's order, exactly as the profession slots had to be.
+
+  **Carry it on the `STATUS` tail**, same as professions and AFK: appended after `played_level`, ignored by an older server slicing `parts[:6]`, forwarded by an older watcher testing `len(parts) >= 8`. Safe in both deploy directions.
+
+  **Cadence:** `PLAYER_EQUIPMENT_CHANGED` registers on this client (confirmed in the sweep), but emitting on every gear swap would flood the queue during questing for a number that barely moves. The existing `STATUS` cadence (login and level-up) is the right frequency.
+
+  **Display:** the ladder is already at ten columns and tight, so this probably belongs in the Big screen meta line and the analytics roster rather than as an eleventh column &mdash; and note the Big screen meta is *already* truncating, so that item wants fixing first.
 
 ### Logged 2026-09-24 &mdash; beta tester feedback
 Raised by real testers after the first proper influx. Ordered smallest to largest.
