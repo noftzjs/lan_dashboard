@@ -102,6 +102,16 @@
         .race-names button .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
                                   background-color: var(--neutral-color); margin-right: 6px; vertical-align: middle; }
         .race-names button.leader .dot { background-color: var(--accent-color); }
+        .grind-bar { fill: var(--s1); }
+        .grind-bar:hover { fill: var(--accent-color); }
+        /* One dot per character per level. Deliberately faint and small: the
+           median bar is the headline, the dots are the spread behind it. */
+        /* Ringed in the panel colour so a dot reads whether it lands on the
+           bar or on the background behind it -- a plain grey dot on the blue
+           bar was nearly invisible, which hid exactly the runs that beat the
+           median. */
+        .grind-dot { fill: #b9b9c4; opacity: 0.9; stroke: var(--card-color); stroke-width: 1.4; }
+        .grind-dot.leader { fill: var(--accent-color); opacity: 1; stroke: var(--card-color); stroke-width: 1.4; }
         .empty { color: var(--text-muted); font-size: 13px; padding: 18px 0; }
         .empty b { color: var(--accent-color); }
         details { border-top: 1px solid var(--border-color); margin-top: 14px; padding-top: 10px; }
@@ -157,6 +167,12 @@
         <h2>The hill ahead</h2>
         <p class="answers">What each level costs, with the leading character's position marked.</p>
         <div class="chart-scroll" id="levelCosts"></div>
+    </div>
+
+    <div class="panel">
+        <h2>What a level really costs</h2>
+        <p class="answers">Played time per level &mdash; time actually logged in, so sleep and breaks don't count. The bar is the group's median; each dot is one character's own run at that level.</p>
+        <div id="grind"></div>
     </div>
 
     <div class="panel">
@@ -334,6 +350,103 @@
     // three characters shared each hue, so the legend could not be read. Here
     // every line is recessive, the leader carries the accent, and hovering a
     // line or a name brings it forward with a tooltip.
+    // Played time per level: the bar is the median across everyone who has
+    // finished that level, the dots are the individual runs.
+    //
+    // Median rather than mean on purpose -- one player who left the game
+    // running overnight at level 12 would drag a mean badly, and there are
+    // only a handful of characters for it to hide behind.
+    function renderGrind(levelTimes, velocity) {
+        const host = document.getElementById("grind");
+        const names = Object.keys(levelTimes || {});
+        if (!names.length) {
+            host.innerHTML = `<p class="empty">No completed levels recorded yet. <b>A level's cost is known once a character leaves it</b>, so this fills in from the second level-up onward.</p>`;
+            return;
+        }
+
+        // Same leader rule as the race chart, so the accent means the same
+        // thing in both panels.
+        let leader = null, best = [-1, Infinity];
+        for (const [name, points] of Object.entries(velocity || {})) {
+            const last = points[points.length - 1];
+            const at = Date.parse(last.at);
+            if (last.level > best[0] || (last.level === best[0] && at < best[1])) {
+                best = [last.level, at];
+                leader = name;
+            }
+        }
+
+        const byLevel = new Map();
+        for (const [name, entries] of Object.entries(levelTimes)) {
+            for (const e of entries) {
+                if (!byLevel.has(e.level)) byLevel.set(e.level, []);
+                byLevel.get(e.level).push({ name, seconds: e.seconds });
+            }
+        }
+        const levels = [...byLevel.keys()].sort((a, b) => a - b);
+        const median = arr => {
+            const v = [...arr].sort((a, b) => a - b);
+            const m = Math.floor(v.length / 2);
+            return v.length % 2 ? v[m] : Math.round((v[m - 1] + v[m]) / 2);
+        };
+        const medians = levels.map(l => median(byLevel.get(l).map(r => r.seconds)));
+        const maxSec = Math.max(...byLevel.get(levels[levels.length - 1]).map(r => r.seconds),
+                                ...medians, 1);
+
+        const W = 640, H = 250, L = 46, R = W - 12, T = 14, B = H - 40;
+        const slot = (R - L) / levels.length;
+        const barW = Math.max(6, Math.min(22, slot * 0.5));
+        const y = sec => B - (sec / maxSec) * (B - T);
+
+        // Ticks every 30 minutes while that stays readable, hourly beyond.
+        const stepSec = maxSec > 4 * 3600 ? 3600 : 1800;
+        const yTicks = [];
+        for (let v = 0; v <= maxSec; v += stepSec) yTicks.push(v);
+
+        const grid = yTicks.map(v => `
+            <line class="grid-line" x1="${L}" y1="${y(v).toFixed(1)}" x2="${R}" y2="${y(v).toFixed(1)}"/>
+            <text class="axis-text" x="${L - 8}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end">${v === 0 ? "0" : formatPlayed(v)}</text>`).join("");
+
+        const marks = levels.map((level, i) => {
+            const cx = L + slot * i + slot / 2;
+            const med = medians[i];
+            const runs = byLevel.get(level);
+            const bar = `<rect class="grind-bar" x="${(cx - barW / 2).toFixed(1)}" y="${y(med).toFixed(1)}"
+                          width="${barW.toFixed(1)}" height="${Math.max(1, B - y(med)).toFixed(1)}" rx="3">
+                          <title>Level ${level}: median ${formatPlayed(med)} across ${runs.length} character${runs.length === 1 ? "" : "s"}</title></rect>`;
+            const dots = runs.map(r => `<circle class="grind-dot${r.name === leader ? " leader" : ""}"
+                          cx="${cx.toFixed(1)}" cy="${y(r.seconds).toFixed(1)}" r="2.6">
+                          <title>${escapeHtml(r.name)} spent ${formatPlayed(r.seconds)} at level ${level}</title></circle>`).join("");
+            const label = (levels.length <= 12 || level % 2 === 0 || i === levels.length - 1)
+                ? `<text class="axis-text" x="${cx.toFixed(1)}" y="${B + 16}" text-anchor="middle">${level}</text>` : "";
+            return bar + dots + label;
+        }).join("");
+
+        host.innerHTML = `
+            <div class="chart-scroll">
+            <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Median played time spent at each level, with each character's own time shown as a dot">
+                ${grid}${marks}
+                <line class="grid-line" x1="${L}" y1="${B}" x2="${R}" y2="${B}"/>
+                <text class="axis-text" x="${L}" y="${H - 6}">Level &rarr;</text>
+            </svg></div>
+            <p class="legend">
+                <span class="key"><span class="sw" style="background-color:var(--s1)"></span>Median for that level</span>
+                <span class="key"><span class="sw" style="background-color:var(--neutral-color);border-radius:50%"></span>One character's run</span>
+                ${leader ? `<span class="key"><span class="sw" style="background-color:var(--accent-color);border-radius:50%"></span>${escapeHtml(leader)} (leading)</span>` : ""}
+            </p>
+            <details><summary>Table view</summary>
+              <div class="table-scroll"><table class="data">
+                <thead><tr><th class="num">Level</th><th class="num">Median</th><th class="num">Fastest</th><th class="num">Slowest</th><th class="num">Characters</th></tr></thead>
+                <tbody>${levels.map((level, i) => {
+                    const secs = byLevel.get(level).map(r => r.seconds);
+                    return `<tr><td class="num">${level}</td><td class="num">${formatPlayed(medians[i])}</td>
+                            <td class="num">${formatPlayed(Math.min(...secs))}</td>
+                            <td class="num">${formatPlayed(Math.max(...secs))}</td>
+                            <td class="num">${secs.length}</td></tr>`;
+                }).join("")}</tbody></table></div>
+            </details>`;
+    }
+
     function renderVelocity(velocity, history) {
         const host = document.getElementById("velocity");
         const names = Object.keys(velocity);
@@ -544,6 +657,7 @@
             renderComposition(data.players);
             renderBands(data.quest_bands);
             renderLevelCosts(data.level_costs, data.players);
+            renderGrind(data.level_times, data.velocity);
             renderVelocity(data.velocity, data.history);
             renderRoster(data.players, data.stale_after_seconds);
             document.getElementById("scope").textContent =

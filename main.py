@@ -1015,6 +1015,20 @@ async def get_analytics(_user: str = Depends(require_roster_auth)):
             " WHERE log_type='XP' AND event_time IS NOT NULL ORDER BY event_time"
         ) as cursor:
             timed_rows = await cursor.fetchall()
+        # Played time at each level-up, which is what makes "how long did that
+        # level take" answerable. Wall-clock between level-ups would count
+        # sleep: on a LAN weekend that turns an ordinary level into a
+        # twelve-hour one purely because the player went to bed during it.
+        #
+        # STATUS rather than XP rows because played_total only rides on STATUS
+        # -- and the addon requests one on every PLAYER_LEVEL_UP, so there is a
+        # sample at each transition rather than only at login.
+        async with db.execute(
+            "SELECT player, level, played_total, event_time FROM xp_history"
+            " WHERE log_type='STATUS' AND event_time IS NOT NULL"
+            " AND played_total IS NOT NULL ORDER BY event_time"
+        ) as cursor:
+            played_rows = await cursor.fetchall()
         async with db.execute("SELECT COUNT(*) AS n FROM xp_history") as cursor:
             history_total = (await cursor.fetchone())["n"]
         async with db.execute(
@@ -1088,6 +1102,32 @@ async def get_analytics(_user: str = Depends(require_roster_auth)):
             "share": round(100 * sum(in_band) / banded_total, 1) if banded_total else 0,
         })
 
+    # The first played_total seen at each level, per character. First rather
+    # than last because the sample taken as a level begins is the clean
+    # boundary; later samples at the same level are mid-level check-ins.
+    first_at_level: dict[str, dict[int, int]] = {}
+    for row in played_rows:
+        levels = first_at_level.setdefault(row["player"], {})
+        levels.setdefault(row["level"], row["played_total"])
+
+    # A level's cost is the played time between arriving at it and arriving at
+    # the next one, so only levels with a recorded successor can be measured.
+    level_times: dict[str, list] = {}
+    for player, levels in first_at_level.items():
+        entries = []
+        for level in sorted(levels):
+            nxt = levels.get(level + 1)
+            if nxt is None:
+                continue
+            seconds = nxt - levels[level]
+            # A negative or absurd delta means the samples are out of order or
+            # a character was reset; drop it rather than draw a spike that
+            # would dominate the axis and mean nothing.
+            if 0 < seconds <= PLAYED_MAX_SECONDS:
+                entries.append({"level": level, "seconds": seconds})
+        if entries:
+            level_times[player] = entries
+
     # One line per character, but only for players with at least two separate
     # moments recorded — a single point is not a trend.
     velocity: dict[str, list] = {}
@@ -1111,6 +1151,7 @@ async def get_analytics(_user: str = Depends(require_roster_auth)):
         "quest_bands": quest_bands,
         "level_costs": [{"level": row["level"], "xp": row["cost"]} for row in level_rows],
         "velocity": velocity,
+        "level_times": level_times,
         "history": {"rows": history_total, "timed_rows": len(timed_rows)},
         "stale_after_seconds": STALE_AFTER_SECONDS,
     }
