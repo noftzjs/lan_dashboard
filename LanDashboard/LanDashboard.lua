@@ -414,6 +414,31 @@ end
 -- Shared by login and by any later change to faction/class/guild, so a
 -- player who changes guilds mid-session doesn't stay stale on the
 -- dashboard until their next login.
+-- The character's whole name, surname included.
+--
+-- Client build 70009 (23 Sep 2026) changed what UnitName("player") hands
+-- back. It used to return "Cyklades Usa" as a single string; it now returns
+-- "Cyklades" and "Usa" as two values. Taking only the first -- which is what
+-- `local name = UnitName("player")` does -- silently dropped every surname,
+-- and since the dashboard keys characters by name, one character started
+-- appearing as two.
+--
+-- The second return is where a realm normally lives, so it is checked against
+-- the realm before being treated as a surname. On a client that goes back to
+-- returning a realm there, this keeps working rather than producing
+-- "Cyklades ClassicBetaPvE2".
+local function fullPlayerName()
+    local first, second = UnitName("player")
+    if not first then return nil end
+    if not second or second == "" then return first end
+    local realm = GetRealmName and GetRealmName() or nil
+    local normalized = GetNormalizedRealmName and GetNormalizedRealmName() or nil
+    if second == realm or second == normalized then
+        return first
+    end
+    return first .. " " .. second
+end
+
 local function sendProfile(playerName)
     local faction = UnitFactionGroup("player") or "Unknown"
     -- classToken is the stable, non-localized name (e.g. "WARRIOR"), safe
@@ -431,7 +456,7 @@ local function sendProfile(playerName)
 end
 
 LanFrame:SetScript("OnEvent", function(self, event, ...)
-    local playerName = UnitName("player")
+    local playerName = fullPlayerName()
 
     -- 1. TRACK PROFILE DATA (Faction, Class, Guild) ON LOGIN / ZONE TRANSITIONS
     if event == "PLAYER_ENTERING_WORLD" then
@@ -559,13 +584,13 @@ LanFrame:SetScript("OnEvent", function(self, event, ...)
             if not afkSince then afkSince = eventTime() end
             tryFlush("afk")
         else
-            afkAccumulate(UnitName("player"))
+            afkAccumulate(fullPlayerName())
         end
 
     elseif event == "PLAYER_LOGOUT" then
         -- Bank an interval that is still open, so a session ending while AFK
         -- still counts. SavedVariables is written after this fires.
-        afkAccumulate(UnitName("player"))
+        afkAccumulate(fullPlayerName())
     end
 end)
 
@@ -872,7 +897,7 @@ local function probeNames()
 end
 
 local function runProbe()
-    local report = { addon = "3.6.0" }
+    local report = { addon = "3.7.0" }
     report.when = (date and date("%Y-%m-%d %H:%M:%S")) or tostring(time and time() or "?")
 
     local okBuild, version, build, buildDate, tocVersion = pcall(GetBuildInfo)
@@ -1066,7 +1091,7 @@ local function buildConfigFrame()
 
     local version = f:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
     version:SetPoint("LEFT", title, "RIGHT", 6, -1)
-    version:SetText("v3.6.0")
+    version:SetText("v3.7.0")
 
     local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -2, -2)
@@ -1202,4 +1227,4 @@ SlashCmdList["LANDASHBOARD"] = function(msg)
     ))
 end
 
-print("|cffcd7f32LAN Dashboard v3.6.0 loaded. Type /ldb to open settings.|r")
+print("|cffcd7f32LAN Dashboard v3.7.0 loaded. Type /ldb to open settings.|r")
