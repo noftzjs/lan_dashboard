@@ -896,8 +896,70 @@ local function probeNames()
     return out
 end
 
+-- Enumerate the statistics the client tracks, rather than guessing ids.
+--
+-- The first look concluded statistics were absent because GetStatistic(60)
+-- returned nothing. Build 70009 shows why that was the wrong reading:
+-- GetAchievementInfo(60) reports name "Total deaths" with isStatistic true,
+-- so the API is real -- "--" is what a statistic with no recorded value
+-- returns, and that character had not died. The question is which statistics
+-- carry values, which only enumeration can answer.
+--
+-- Worth knowing before trusting any of it: statistics are per character and
+-- the client may only populate them once the relevant UI has been opened, so
+-- an empty result here is weaker evidence than a populated one.
+local function probeStatistics()
+    local report = { available = {}, categories = 0, statistics = 0, withValues = {}, empty = 0 }
+
+    for _, name in ipairs({ "GetStatistic", "GetAchievementInfo", "GetCategoryNumAchievements",
+                            "GetStatisticsCategoryList", "GetCategoryList",
+                            "GetAchievementNumCriteria", "GetComparisonStatistic" }) do
+        report.available[name] = (type(_G[name]) == "function")
+    end
+
+    if not report.available["GetStatisticsCategoryList"]
+        or not report.available["GetCategoryNumAchievements"]
+        or not report.available["GetAchievementInfo"] then
+        report.note = "cannot enumerate: one of GetStatisticsCategoryList / "
+            .. "GetCategoryNumAchievements / GetAchievementInfo is missing"
+        return report
+    end
+
+    local okCats, categories = pcall(GetStatisticsCategoryList)
+    if not okCats or type(categories) ~= "table" then
+        report.note = "GetStatisticsCategoryList() gave " .. tostring(categories)
+        return report
+    end
+    report.categories = #categories
+
+    for _, categoryId in ipairs(categories) do
+        local okNum, count = pcall(GetCategoryNumAchievements, categoryId, true)
+        if okNum and type(count) == "number" then
+            for i = 1, count do
+                local okInfo, id, name = pcall(GetAchievementInfo, categoryId, i)
+                if okInfo and id and name then
+                    report.statistics = report.statistics + 1
+                    local okValue, value = pcall(GetStatistic, id)
+                    value = okValue and tostring(value) or "errored"
+                    -- "--" is the client's own "nothing recorded"; anything
+                    -- else is a statistic that is actually being kept.
+                    if value ~= "--" and value ~= "nil" and value ~= "0" and value ~= "" then
+                        if #report.withValues < 60 then
+                            report.withValues[#report.withValues + 1] =
+                                string.format("%s = %s (id %s)", tostring(name), value, tostring(id))
+                        end
+                    else
+                        report.empty = report.empty + 1
+                    end
+                end
+            end
+        end
+    end
+    return report
+end
+
 local function runProbe()
-    local report = { addon = "3.7.0" }
+    local report = { addon = "3.8.0" }
     report.when = (date and date("%Y-%m-%d %H:%M:%S")) or tostring(time and time() or "?")
 
     local okBuild, version, build, buildDate, tocVersion = pcall(GetBuildInfo)
@@ -1091,7 +1153,7 @@ local function buildConfigFrame()
 
     local version = f:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
     version:SetPoint("LEFT", title, "RIGHT", 6, -1)
-    version:SetText("v3.7.0")
+    version:SetText("v3.8.0")
 
     local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -2, -2)
@@ -1209,6 +1271,27 @@ SlashCmdList["LANDASHBOARD"] = function(msg)
               "  |  /ldb private gold to toggle.|r")
         return
     end
+    if msg == "stats" then
+        local report = probeStatistics()
+        LanDashboardDB.statsProbe = report
+        print("|cffe8a33d[LAN Dashboard] Statistics probe|r")
+        local have = {}
+        for name, present in pairs(report.available) do
+            have[#have + 1] = name .. "=" .. tostring(present)
+        end
+        print("  " .. table.concat(have, " "))
+        if report.note then print("  " .. report.note) end
+        print(string.format("  %d categories, %d statistics, %d with a value, %d empty",
+            report.categories, report.statistics, #report.withValues, report.empty))
+        for i = 1, math.min(#report.withValues, 15) do
+            print("    " .. report.withValues[i])
+        end
+        if #report.withValues > 15 then
+            print(string.format("    ... and %d more (all in SavedVariables)", #report.withValues - 15))
+        end
+        print("|cffe8a33d  Saved to LanDashboardDB.statsProbe -- /reload, then send me that block.|r")
+        return
+    end
     if msg == "probe" then
         runProbe()
         return
@@ -1227,4 +1310,4 @@ SlashCmdList["LANDASHBOARD"] = function(msg)
     ))
 end
 
-print("|cffcd7f32LAN Dashboard v3.7.0 loaded. Type /ldb to open settings.|r")
+print("|cffcd7f32LAN Dashboard v3.8.0 loaded. Type /ldb to open settings.|r")
