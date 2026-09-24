@@ -408,6 +408,160 @@ local PROBE_FUNCS = {
 
 local PROBE_CHAT_LIMIT = 12
 
+-- Every entry below is here because a current or backlogged feature depends on
+-- the answer -- this is not a catalogue of the API surface for its own sake.
+-- Each is { function name, args... }; the args are harmless reads.
+local PROBE_CALLS = {
+    -- Identity. Drives the open "WoW Forever" player-keying question: if the
+    -- single-server model is real, realm may be empty or constant, which is
+    -- exactly what the dashboard currently keys players on.
+    { "UnitName", "player" },
+    { "UnitFullName", "player" },
+    { "GetRealmName" },
+    { "GetNormalizedRealmName" },
+    { "UnitGUID", "player" },
+    { "UnitFactionGroup", "player" },
+    { "GetGuildInfo", "player" },
+    -- Location. Zone is currently stored as a localised display string; a map
+    -- ID would be stable across clients and languages.
+    { "GetZoneText" },
+    { "GetSubZoneText" },
+    { "GetRealZoneText" },
+    -- Progress and the stats already tracked, plus AFK for that backlog item.
+    { "GetMoney" },
+    { "UnitXP", "player" },
+    { "UnitXPMax", "player" },
+    { "GetXPExhaustion" },
+    { "UnitIsAFK", "player" },
+    { "GetAverageItemLevel" },
+    -- LoggingCombat() with no argument reports the current state without
+    -- changing it. This one decides whether "damage done" is even reachable:
+    -- the combat log file is useless if nobody can turn it on automatically.
+    { "LoggingCombat" },
+    -- Statistics would be a shortcut for several "more data points" items
+    -- (deaths, quests completed) without tracking them ourselves.
+    { "GetStatistic", 60 },
+    { "GetAchievementInfo", 60 },
+}
+
+local PROBE_NAMESPACES = {
+    { "C_Map", { "GetBestMapForUnit", "GetMapInfo", "GetPlayerMapPosition" } },
+    { "C_PlayerInfo", { "GetClass", "GetRace", "UnitIsSameServer" } },
+    { "C_QuestLog", { "GetNumQuestLogEntries", "GetInfo", "IsQuestFlaggedCompleted" } },
+    { "C_TradeSkillUI", { "GetBaseProfessionInfo", "GetTradeSkillLine" } },
+    { "C_AchievementInfo", { "GetSupercedingAchievements" } },
+    { "C_Container", { "GetContainerNumSlots" } },
+    { "C_CurrencyInfo", { "GetCurrencyInfo" } },
+    { "C_DateAndTime", { "GetServerTimeLocal" } },
+}
+
+-- COMBAT_LOG_EVENT_UNFILTERED is deliberately NOT in this list. It is already
+-- known removed, and registering a forbidden event is what raises the
+-- ADDON_ACTION_FORBIDDEN dialog that broke the addon before -- re-testing it
+-- would cost a tester an intrusive popup to learn nothing new.
+local PROBE_EVENTS = {
+    "PLAYER_FLAGS_CHANGED", "TIME_PLAYED_MSG", "PLAYER_MONEY", "PLAYER_XP_UPDATE",
+    "PLAYER_LEVEL_UP", "PLAYER_DEAD", "QUEST_TURNED_IN", "ZONE_CHANGED_NEW_AREA",
+    "SKILL_LINES_CHANGED", "TRADE_SKILL_UPDATE", "ACHIEVEMENT_EARNED",
+    "PLAYER_EQUIPMENT_CHANGED", "UPDATE_FACTION", "CHAT_MSG_SYSTEM",
+}
+
+local function describeReturns(...)
+    local count = select("#", ...)
+    if count == 0 then return "(no return)" end
+    local parts = {}
+    for i = 1, count do
+        parts[#parts + 1] = tostring((select(i, ...)))
+    end
+    return table.concat(parts, " | ")
+end
+
+-- Calls a global safely and renders whatever came back. Written so a nil in
+-- the middle of a return list is preserved rather than silently truncated.
+local function callInfo(name, ...)
+    local fn = _G[name]
+    if type(fn) ~= "function" then
+        return (_G[name] ~= nil) and ("present but " .. type(_G[name])) or "absent"
+    end
+    local function handle(ok, ...)
+        if not ok then return "errored: " .. tostring((select(1, ...))) end
+        return describeReturns(...)
+    end
+    return handle(pcall(fn, ...))
+end
+
+local function namespaceInfo(name, members)
+    local ns = _G[name]
+    if type(ns) ~= "table" then return "absent" end
+    local have = {}
+    for _, member in ipairs(members) do
+        have[#have + 1] = member .. "=" .. ((ns[member] ~= nil) and "yes" or "no")
+    end
+    return table.concat(have, " ")
+end
+
+-- Whether an event can be registered at all. Each is unregistered immediately;
+-- registering does not make it fire, so this observes without subscribing.
+local function probeEvents()
+    local results = {}
+    local okFrame, frame = pcall(CreateFrame, "Frame")
+    if not okFrame or not frame then
+        results["(all)"] = "CreateFrame unavailable"
+        return results
+    end
+    for _, event in ipairs(PROBE_EVENTS) do
+        local ok, err = pcall(frame.RegisterEvent, frame, event)
+        if ok then
+            results[event] = "ok"
+            pcall(frame.UnregisterEvent, frame, event)
+        else
+            results[event] = "REFUSED: " .. tostring(err)
+        end
+    end
+    return results
+end
+
+-- Slot-aware, unlike the v3.1.0 probe. GetProfessions returns fixed positions
+-- and this client returned First Aid -- which modern retail does not have --
+-- so its slot meanings are demonstrably not retail's and have to be read off
+-- rather than assumed. The list constructor keeps the holes, so position is
+-- preserved where pairs() would have dropped it.
+local function probeProfessionSlots()
+    if type(GetProfessions) ~= "function" then return nil end
+    local ok, a, b, c, d, e = pcall(GetProfessions)
+    if not ok then return nil end
+    local indices = { a, b, c, d, e }
+    local slots = {}
+    for slot = 1, 5 do
+        local index = indices[slot]
+        if index == nil then
+            slots["slot" .. slot] = "(empty)"
+        else
+            local okInfo, name, _, rank, maxRank = pcall(GetProfessionInfo, index)
+            if okInfo and type(name) == "string" then
+                slots["slot" .. slot] = string.format("%s %s/%s (book index %s)",
+                    name, tostring(rank), tostring(maxRank), tostring(index))
+            else
+                slots["slot" .. slot] = "index " .. tostring(index) .. " unreadable"
+            end
+        end
+    end
+    return slots
+end
+
+-- A stable map ID would be a better zone key than the localised name the
+-- dashboard stores today; this reports whether one is obtainable.
+local function probeMap()
+    if type(C_Map) ~= "table" or type(C_Map.GetBestMapForUnit) ~= "function" then
+        return "C_Map.GetBestMapForUnit absent"
+    end
+    local ok, mapId = pcall(C_Map.GetBestMapForUnit, "player")
+    if not ok or not mapId then return "no map id for player" end
+    local okInfo, info = pcall(C_Map.GetMapInfo, mapId)
+    local name = (okInfo and type(info) == "table" and info.name) or "?"
+    return string.format("id %s = %s", tostring(mapId), tostring(name))
+end
+
 local function probeRetail()
     if not GetProfessions or not GetProfessionInfo then
         return nil, "GetProfessions/GetProfessionInfo absent"
@@ -487,7 +641,7 @@ local function reportSection(label, found, err)
 end
 
 local function runProbe()
-    local report = { addon = "3.1.0" }
+    local report = { addon = "3.2.0" }
     report.when = (date and date("%Y-%m-%d %H:%M:%S")) or tostring(time and time() or "?")
 
     local okBuild, version, build, buildDate, tocVersion = pcall(GetBuildInfo)
@@ -505,6 +659,19 @@ local function runProbe()
 
     report.retail, report.retailError = probeRetail()
     report.classic, report.classicError = probeClassic()
+    report.professionSlots = probeProfessionSlots()
+    report.map = probeMap()
+
+    report.calls = {}
+    for _, entry in ipairs(PROBE_CALLS) do
+        report.calls[entry[1]] = callInfo(entry[1], entry[2], entry[3])
+    end
+    report.namespaces = {}
+    for _, entry in ipairs(PROBE_NAMESPACES) do
+        report.namespaces[entry[1]] = namespaceInfo(entry[1], entry[2])
+    end
+    report.events = probeEvents()
+
     LanDashboardDB.probe = report
 
     local present = {}
@@ -512,11 +679,42 @@ local function runProbe()
         present[#present + 1] = name .. "=" .. tostring(report.present[name])
     end
 
-    print("|cffe8a33d[LAN Dashboard] Profession API probe|r")
+    print("|cffe8a33d[LAN Dashboard] Client API probe|r")
     print("  client: " .. report.client)
     print("  present: " .. table.concat(present, " "))
     reportSection("retail GetProfessions()", report.retail, report.retailError)
     reportSection("classic skill list", report.classic, report.classicError)
+
+    print("|cffe8a33d  profession slots:|r")
+    if report.professionSlots then
+        for slot = 1, 5 do
+            print("    slot" .. slot .. ": " .. tostring(report.professionSlots["slot" .. slot]))
+        end
+    else
+        print("    unavailable")
+    end
+    print("|cffe8a33d  map:|r " .. tostring(report.map))
+
+    local refused = {}
+    for _, event in ipairs(PROBE_EVENTS) do
+        if report.events[event] ~= "ok" then
+            refused[#refused + 1] = event
+        end
+    end
+    print(string.format("|cffe8a33d  events:|r %d of %d registrable%s",
+        #PROBE_EVENTS - #refused, #PROBE_EVENTS,
+        (#refused > 0) and (" -- REFUSED: " .. table.concat(refused, ", ")) or ""))
+
+    local absent = {}
+    for _, entry in ipairs(PROBE_CALLS) do
+        if report.calls[entry[1]] == "absent" then absent[#absent + 1] = entry[1] end
+    end
+    print(string.format("|cffe8a33d  calls:|r %d probed%s", #PROBE_CALLS,
+        (#absent > 0) and (" -- absent: " .. table.concat(absent, ", ")) or " -- all present"))
+    for _, entry in ipairs(PROBE_NAMESPACES) do
+        print("    " .. entry[1] .. ": " .. tostring(report.namespaces[entry[1]]))
+    end
+    print("|cffe8a33d  (full values are in SavedVariables, not printed here)|r")
     print("|cffe8a33d  Saved to LanDashboardDB.probe -- type /reload, then send me the probe block from SavedVariables.|r")
 end
 
@@ -548,4 +746,4 @@ SlashCmdList["LANDASHBOARD"] = function(msg)
     ))
 end
 
-print("|cffcd7f32LAN Dashboard v3.1.0 Initialized! Type /ldb to check reload-trigger status, /ldb sync to test the sync button, /ldb probe to report this client's profession API.|r")
+print("|cffcd7f32LAN Dashboard v3.2.0 Initialized! Type /ldb to check reload-trigger status, /ldb sync to test the sync button, /ldb probe to report what this client's API exposes.|r")
