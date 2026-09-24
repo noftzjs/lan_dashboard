@@ -158,6 +158,21 @@ Measured with `/ldb probe` (addon v3.2.0) on `1.60.1 build 69977, toc 16001`. Re
 
   **Display:** the ladder is already at ten columns and tight, so this probably belongs in the Big screen meta line and the analytics roster rather than as an eleventh column &mdash; and note the Big screen meta is *already* truncating, so that item wants fixing first.
 
+### Logged 2026-09-24 &mdash; end-of-LAN report
+- [ ] **A report to close the event with: who died most, who quested most, who got there first.** The dashboard answers "what is happening"; this answers "what happened", once, at the end. It is the thing people screenshot into Discord on the Sunday night, so it is worth more than its build cost.
+
+  **Most of the data already exists.** Deaths by zone and by level, played time per level, activity per hour, professions, item level, AFK time, zone history and the game's lifetime quest count are all recorded. Candidate awards, each already answerable: most deaths (with the zone that did it); highest level, and who reached it first; fastest single level and longest grind, both from `level_times`; most time played, and most time AFK; most zones visited, now that zone history is kept; night owl, from the latest active hour; and richest, from gold.
+
+  **Freeze it.** The single most important design point: a report that recomputes on every load is not a record of the LAN, it is a live page that will disagree with the screenshot someone took. Generate it once against a time range, store the result, and serve the stored copy. That also settles what happens when a character keeps playing afterwards.
+
+  **Four fairness traps, all of which would produce a wrong winner:**
+  - **Gold is opt-in**, so a "richest" award silently ranks only the people who chose to share. Either drop that award or label it *among those sharing* &mdash; never present a partial field as a full ranking.
+  - **Late joiners lose every total.** Someone who rolled an alt on day two cannot win "most quests" on volume. Pair each total with a rate (per hour played) so both kinds of achievement are visible.
+  - **AFK is addon-measured and only counts since install**, unlike `/played`, which the realm vouches for. An award built on it is really "most AFK that we saw".
+  - **Quests now have two numbers** &mdash; the game's lifetime figure and what this dashboard saw. The lifetime one includes play from before the LAN, which is the wrong measure for an event award. The dashboard's own count is the right one here, which is the opposite of the choice made for the roster column, and the report should say which it used.
+
+  **Shape:** a `/report` page is the obvious form, and unlike `/analytics` it wants to be public &mdash; the whole point is sharing it. Worth considering whether it renders to an image, since a link that needs a login is not what gets posted in a channel.
+
 ### Logged 2026-09-24 &mdash; beta tester feedback
 Raised by real testers after the first proper influx. Ordered smallest to largest.
 
