@@ -168,7 +168,10 @@ async def startup_event():
                 gold INTEGER,
                 played_total INTEGER,
                 played_level INTEGER,
-                private_fields TEXT
+                private_fields TEXT,
+                item_level REAL,
+                afk_total INTEGER,
+                professions TEXT
             )
         """)
         # Migrate older databases created before these columns were tracked.
@@ -189,6 +192,14 @@ async def startup_event():
         # dash is an absence).
         if "private_fields" not in existing_columns:
             await db.execute("ALTER TABLE player_snapshots ADD COLUMN private_fields TEXT")
+        # The STATUS tail (addon v3.3.0+). Older addons send a 6-field STATUS
+        # and simply leave these NULL.
+        if "item_level" not in existing_columns:
+            await db.execute("ALTER TABLE player_snapshots ADD COLUMN item_level REAL")
+        if "afk_total" not in existing_columns:
+            await db.execute("ALTER TABLE player_snapshots ADD COLUMN afk_total INTEGER")
+        if "professions" not in existing_columns:
+            await db.execute("ALTER TABLE player_snapshots ADD COLUMN professions TEXT")
 
         # One-time cleanup: older addon/mock-generator versions stored the
         # literal string "No Guild" for guildless characters, indistinguishable
@@ -256,6 +267,9 @@ async def reload_states_from_db():
                     "played_total": row["played_total"],
                     "played_level": row["played_level"],
                     "private_fields": json.loads(row["private_fields"] or "[]"),
+                    "item_level": row["item_level"],
+                    "afk_total": row["afk_total"],
+                    "professions": json.loads(row["professions"] or "[]"),
                     "stream_urls": [],
                     "tags": [],
                 }
@@ -332,8 +346,64 @@ GOLD_MAX_COPPER = 2_147_483_647
 # Seconds. Around eleven years of playtime -- not a number a real
 # character reaches, but small enough to catch a garbled field.
 PLAYED_MAX_SECONDS = 350_000_000
+# Item level is a float on this client (12.5 at level 18). The ceiling is a
+# garbage filter, not a real cap -- it only has to be above anything the game
+# can legitimately report.
+ITEM_LEVEL_MAX = 10_000
+# AFK is accumulated by the addon rather than reported by the game, so it can
+# never exceed total playtime; that relationship is checked rather than this
+# bound, which is only here to reject nonsense.
+AFK_MAX_SECONDS = PLAYED_MAX_SECONDS
+PROFESSIONS_MAX_COUNT = 10
+PROFESSION_NAME_MAX_LENGTH = 40
+PROFESSION_RANK_MAX = 1_000
 
 # --- INGESTION ENDPOINT ---
+def parse_optional_number(raw: str, field: str, private_fields: list[str], cast=int):
+    """A STATUS field that may be absent, withheld, or a value.
+
+    Three states, deliberately distinguished: the field not being sent at all
+    (an older addon) leaves it None and says nothing about intent, an empty
+    slot is the player declining to share it, and anything else is a value.
+    """
+    if raw is None:
+        return None
+    if raw == "":
+        private_fields.append(field)
+        return None
+    return cast(raw)
+
+
+def parse_professions(fields: list[str]) -> list[dict]:
+    """The variable-length tail: name:rank:maxRank, one per profession.
+
+    Names can contain spaces ("First Aid") but never commas or colons, so this
+    encoding is unambiguous. A malformed entry raises rather than being
+    skipped -- silently dropping one would hide an addon bug behind a
+    dashboard that merely looks a bit empty.
+    """
+    professions = []
+    if len(fields) > PROFESSIONS_MAX_COUNT:
+        raise ValueError(f"{len(fields)} professions exceeds cap {PROFESSIONS_MAX_COUNT}")
+    for field in fields:
+        if not field:
+            continue
+        bits = field.split(":")
+        if len(bits) != 3:
+            raise ValueError(f"Profession {field!r} is not name:rank:maxRank")
+        name, rank_raw, max_raw = bits
+        name = name.strip()
+        if not name or len(name) > PROFESSION_NAME_MAX_LENGTH:
+            raise ValueError(f"Profession name {name!r} is empty or too long")
+        rank, max_rank = int(rank_raw), int(max_raw)
+        if not (0 <= rank <= PROFESSION_RANK_MAX) or not (0 <= max_rank <= PROFESSION_RANK_MAX):
+            raise ValueError(f"Profession {name!r} rank {rank}/{max_rank} outside sane range")
+        if rank > max_rank:
+            raise ValueError(f"Profession {name!r} rank {rank} exceeds max {max_rank}")
+        professions.append({"name": name, "rank": rank, "max_rank": max_rank})
+    return professions
+
+
 def default_state():
     # A function, not a module-level dict: "tags" is a list, and a shallow
     # dict(DEFAULT_STATE) copy would leave every player sharing the same
@@ -343,7 +413,7 @@ def default_state():
         "last_updated": None, "current_zone": None, "faction": None, "guild": None,
         "class": None, "last_activity": None, "gold": None,
         "played_total": None, "played_level": None, "stream_urls": [], "tags": [],
-        "private_fields": [],
+        "private_fields": [], "item_level": None, "afk_total": None, "professions": [],
     }
 
 
@@ -508,11 +578,15 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                 level, current_xp, max_xp = (int(p) for p in parts[:3])
                 played_total, played_level = (int(p) for p in parts[4:6])
                 private_fields = []
-                if parts[3] == "":
-                    gold = None
-                    private_fields.append("gold")
-                else:
-                    gold = int(parts[3])
+                gold = parse_optional_number(parts[3], "gold", private_fields)
+                # Everything from here is the v3.3.0 tail. Absent is normal --
+                # a tester still on an older addon sends six fields -- so these
+                # are read positionally only if they were sent at all.
+                item_level = parse_optional_number(
+                    parts[6] if len(parts) > 6 else None, "item_level", private_fields, float)
+                afk_total = parse_optional_number(
+                    parts[7] if len(parts) > 7 else None, "afk_total", private_fields)
+                professions = parse_professions(parts[8:]) if len(parts) > 8 else None
                 if not (LEVEL_MIN <= level <= LEVEL_MAX):
                     raise ValueError(f"Level {level} outside valid range {LEVEL_MIN}-{LEVEL_MAX}")
                 if not (0 <= current_xp <= XP_SANITY_CEILING):
@@ -528,6 +602,18 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                         raise ValueError(f"{label} {seconds} outside sane range")
                 if played_level > played_total:
                     raise ValueError(f"played_level {played_level} exceeds played_total {played_total}")
+                if item_level is not None and not (0 <= item_level <= ITEM_LEVEL_MAX):
+                    raise ValueError(f"item_level {item_level} outside sane range")
+                if afk_total is not None:
+                    if not (0 <= afk_total <= AFK_MAX_SECONDS):
+                        raise ValueError(f"afk_total {afk_total} outside sane range")
+                    # The addon counts this itself, so unlike /played there is
+                    # no authority behind it -- a value above total playtime
+                    # means the counter is broken, not that the player was
+                    # extraordinarily idle.
+                    if played_total and afk_total > played_total:
+                        raise ValueError(
+                            f"afk_total {afk_total} exceeds played_total {played_total}")
 
                 pct = 100.0 if max_xp == 0 else round((current_xp / max_xp) * 100, 2)
                 last_updated = datetime.now().isoformat()
@@ -536,6 +622,11 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                     "level": level, "current_xp": current_xp, "max_xp": max_xp,
                     "pct": pct, "last_updated": last_updated, "gold": gold,
                     "private_fields": private_fields,
+                    "item_level": item_level,
+                    "afk_total": afk_total,
+                    # None means an older addon that never mentioned them, so
+                    # keep whatever was already known rather than wiping it.
+                    "professions": state["professions"] if professions is None else professions,
                     # A 0 here means "the addon has no answer yet" rather than
                     # "zero seconds played", so it is stored as unknown.
                     "played_total": played_total or None,
@@ -544,18 +635,23 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                 await db.execute("""
                     INSERT INTO player_snapshots
                         (player, level, current_xp, max_xp, pct, last_updated,
-                         gold, played_total, played_level, private_fields)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         gold, played_total, played_level, private_fields,
+                         item_level, afk_total, professions)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(player) DO UPDATE SET
                         level=excluded.level, current_xp=excluded.current_xp,
                         max_xp=excluded.max_xp, pct=excluded.pct,
                         last_updated=excluded.last_updated, gold=excluded.gold,
                         played_total=excluded.played_total,
                         played_level=excluded.played_level,
-                        private_fields=excluded.private_fields
+                        private_fields=excluded.private_fields,
+                        item_level=excluded.item_level,
+                        afk_total=excluded.afk_total,
+                        professions=excluded.professions
                 """, (player_name, level, current_xp, max_xp, pct, last_updated,
                       gold, state["played_total"], state["played_level"],
-                      json.dumps(private_fields)))
+                      json.dumps(private_fields), item_level, afk_total,
+                      json.dumps(state["professions"])))
                 await db.execute("""
                     INSERT INTO xp_history
                         (timestamp, player, log_type, level, current_xp, max_xp,
