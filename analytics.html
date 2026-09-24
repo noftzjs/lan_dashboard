@@ -124,6 +124,19 @@
         .death-lvl { fill: var(--s1); }
         .death-lvl:hover { fill: var(--accent-color); }
         .death-sub { color: var(--text-muted); font-size: 12px; margin: 16px 0 2px; }
+        /* A sequential ramp, validated against this surface: four steps is
+           what fits with visible gaps between them and a light end that still
+           clears the background. Five was too crowded to tell apart. */
+        :root {
+            --h1: #305170; --h2: #36699e; --h3: #3c7fc9; --h4: #4491ec;
+        }
+        .heat-cell { stroke: var(--card-color); stroke-width: 1; }
+        .heat-0 { fill: #23232b; }
+        .heat-1 { fill: var(--h1); }
+        .heat-2 { fill: var(--h2); }
+        .heat-3 { fill: var(--h3); }
+        .heat-4 { fill: var(--h4); }
+        .heat-name { fill: var(--text-muted); font-size: 11px; }
         .empty { color: var(--text-muted); font-size: 13px; padding: 18px 0; }
         .empty b { color: var(--accent-color); }
         details { border-top: 1px solid var(--border-color); margin-top: 14px; padding-top: 10px; }
@@ -189,6 +202,12 @@
         <h2>Race to 60</h2>
         <p class="answers">Level over time, on the in-game clock. The leader is highlighted; hover any line or name to follow that character.</p>
         <div id="velocity"></div>
+    </div>
+
+    <div class="panel">
+        <h2>When everyone played</h2>
+        <p class="answers">One square per character per hour, brighter where more happened. The dark stretches are hours with nothing recorded &mdash; sleep, mostly.</p>
+        <div id="activity"></div>
     </div>
 
     <div class="panel">
@@ -573,6 +592,93 @@
     // amounts of history -- the zone rode along in the payload from the start
     // but was discarded until there was a column for it -- so deaths that
     // predate that are counted and named rather than quietly dropped.
+    // One square per character per hour. Activity means "any recorded event",
+    // not just level-ups -- an hour of questing counts as playing.
+    //
+    // Empty hours are kept on the axis rather than skipped: the gaps are the
+    // point, because they are what show the overnight breaks and who was
+    // still up at 4am.
+    function renderActivity(activity, hours, players) {
+        const host = document.getElementById("activity");
+        const names = players.map(p => p.name).filter(n => activity[n]);
+        if (!names.length || !hours.length) {
+            host.innerHTML = `<p class="empty">Nothing timed yet. <b>This fills in as events arrive carrying the game's clock</b> (addon v2.11.0+).</p>`;
+            return;
+        }
+
+        // A continuous axis from first hour to last, so quiet hours occupy
+        // space instead of being closed up.
+        const toDate = key => new Date(key + ":00:00Z");
+        const first = toDate(hours[0]), last = toDate(hours[hours.length - 1]);
+        const axis = [];
+        for (let t = first.getTime(); t <= last.getTime(); t += 3600000) {
+            const d = new Date(t);
+            axis.push({
+                key: d.toISOString().slice(0, 13),
+                date: d,
+            });
+        }
+
+        // Thresholds from the quartiles of the hours that had any activity.
+        // Scaling against the single busiest hour instead would push almost
+        // every square into the faintest step.
+        const counts = Object.values(activity).flatMap(byHour => Object.values(byHour)).sort((a, b) => a - b);
+        const q = f => counts[Math.min(counts.length - 1, Math.floor(counts.length * f))];
+        const t1 = q(0.25), t2 = q(0.5), t3 = q(0.75);
+        const step = n => n === 0 ? 0 : n <= t1 ? 1 : n <= t2 ? 2 : n <= t3 ? 3 : 4;
+
+        const cell = 13, gap = 0, labelW = 150, rowH = 18;
+        const W = labelW + axis.length * cell + 12;
+        const H = names.length * rowH + 42;
+
+        const rows = names.map((name, r) => {
+            const y = r * rowH + 24;
+            const byHour = activity[name] || {};
+            const squares = axis.map((h, i) => {
+                const n = byHour[h.key] || 0;
+                const local = h.date.toLocaleString([], { weekday: "short", hour: "numeric" });
+                return `<rect class="heat-cell heat-${step(n)}" x="${labelW + i * cell}" y="${y}"
+                          width="${cell - 1}" height="${rowH - 4}" rx="2"
+                        ><title>${escapeHtml(name)} — ${local}: ${n} event${n === 1 ? "" : "s"}</title></rect>`;
+            }).join("");
+            return `<text class="heat-name" x="${labelW - 8}" y="${y + 11}" text-anchor="end">${escapeHtml(name)}</text>${squares}`;
+        }).join("");
+
+        // A label every six hours keeps the axis readable at any LAN length.
+        const ticks = axis.map((h, i) => {
+            if (h.date.getHours() % 6 !== 0) return "";
+            return `<text class="axis-text" x="${labelW + i * cell + cell / 2}" y="16" text-anchor="middle">${h.date.toLocaleString([], { weekday: "short", hour: "numeric" })}</text>`;
+        }).join("");
+
+        const totals = names.map(n => ({
+            name: n,
+            events: Object.values(activity[n]).reduce((a, b) => a + b, 0),
+            hoursActive: Object.keys(activity[n]).length,
+        }));
+
+        host.innerHTML = `
+            <div class="chart-scroll">
+            <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Activity per character per hour">
+                ${ticks}${rows}
+            </svg></div>
+            <p class="legend">
+                <span class="key"><span class="sw" style="background-color:#23232b"></span>nothing recorded</span>
+                <span class="key"><span class="sw" style="background-color:var(--h1)"></span>quiet</span>
+                <span class="key"><span class="sw" style="background-color:var(--h2)"></span></span>
+                <span class="key"><span class="sw" style="background-color:var(--h3)"></span></span>
+                <span class="key"><span class="sw" style="background-color:var(--h4)"></span>busiest</span>
+                <span class="key">${axis.length} hours from first event to last</span>
+            </p>
+            <details><summary>Table view</summary>
+              <div class="table-scroll"><table class="data">
+                <thead><tr><th>Character</th><th class="num">Events</th><th class="num">Hours active</th><th class="num">Events per active hour</th></tr></thead>
+                <tbody>${totals.map(t => `<tr><td>${escapeHtml(t.name)}</td>
+                    <td class="num">${t.events}</td><td class="num">${t.hoursActive}</td>
+                    <td class="num">${(t.events / t.hoursActive).toFixed(1)}</td></tr>`).join("")}</tbody>
+              </table></div>
+            </details>`;
+    }
+
     function renderDeaths(byZone, byLevel, withoutZone) {
         const host = document.getElementById("deaths");
         if (!byZone.length && !byLevel.length) {
@@ -684,6 +790,7 @@
             renderBands(data.quest_bands);
             renderGrind(data.level_times, data.velocity);
             renderVelocity(data.velocity, data.history);
+            renderActivity(data.activity, data.activity_hours, data.players);
             renderDeaths(data.deaths_by_zone, data.deaths_by_level, data.deaths_without_zone);
             renderRoster(data.players, data.stale_after_seconds);
             document.getElementById("scope").textContent =

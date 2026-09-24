@@ -474,6 +474,16 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                     raise ValueError(f"Zone name too long ({len(zone_name)} chars): {zone_name!r}")
                 state = player_states.setdefault(player_name, default_state())
                 state["current_zone"] = zone_name
+                # Recorded as history as well as a current value. Without this
+                # a zone change only ever overwrote where a character is now,
+                # so "where did the weekend go" was unanswerable -- and once a
+                # LAN is over that data does not come back. Same omission the
+                # DEATH zone had.
+                await db.execute("""
+                    INSERT INTO xp_history (timestamp, player, log_type, level, event_time, zone)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (payload.timestamp, player_name, log_type, state["level"],
+                      event_time.isoformat() if event_time else None, zone_name or None))
                 await db.execute("""
                     INSERT INTO player_snapshots (player, level, current_xp, max_xp, pct, last_updated, current_zone)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1058,6 +1068,16 @@ async def get_analytics(_user: str = Depends(require_roster_auth)):
             "SELECT COUNT(*) AS n FROM xp_history WHERE log_type='DEATH' AND (zone IS NULL OR zone = '')"
         ) as cursor:
             deaths_without_zone = (await cursor.fetchone())["n"]
+        # Everything that happened, bucketed by the hour it happened in.
+        # Every stored event type carries event_time, so this covers the whole
+        # record rather than one kind of activity -- it is a measure of "was
+        # this person playing", not "was this person levelling".
+        async with db.execute(
+            "SELECT player, substr(event_time, 1, 13) AS hour, COUNT(*) AS n"
+            " FROM xp_history WHERE event_time IS NOT NULL"
+            " GROUP BY player, hour ORDER BY hour"
+        ) as cursor:
+            activity_rows = await cursor.fetchall()
         async with db.execute("SELECT COUNT(*) AS n FROM xp_history") as cursor:
             history_total = (await cursor.fetchone())["n"]
         async with db.execute(
@@ -1131,6 +1151,15 @@ async def get_analytics(_user: str = Depends(require_roster_auth)):
             "share": round(100 * sum(in_band) / banded_total, 1) if banded_total else 0,
         })
 
+    # Reshaped per character so the page does not have to pivot it. The hour
+    # key is an ISO prefix ("2026-11-04T19"), which sorts correctly as text and
+    # needs no timezone handling on either side.
+    activity: dict[str, dict[str, int]] = {}
+    activity_hours: set[str] = set()
+    for row in activity_rows:
+        activity.setdefault(row["player"], {})[row["hour"]] = row["n"]
+        activity_hours.add(row["hour"])
+
     # The first played_total seen at each level, per character. First rather
     # than last because the sample taken as a level begins is the clean
     # boundary; later samples at the same level are mid-level check-ins.
@@ -1181,6 +1210,8 @@ async def get_analytics(_user: str = Depends(require_roster_auth)):
         "level_costs": [{"level": row["level"], "xp": row["cost"]} for row in level_rows],
         "velocity": velocity,
         "level_times": level_times,
+        "activity": activity,
+        "activity_hours": sorted(activity_hours),
         "deaths_by_level": deaths_by_level,
         "deaths_by_zone": deaths_by_zone,
         "deaths_without_zone": deaths_without_zone,
