@@ -602,6 +602,12 @@ local PROBE_CALLS = {
     -- exactly what the dashboard currently keys players on.
     { "UnitName", "player" },
     { "UnitFullName", "player" },
+    -- Every other way this client might spell the same character. One of
+    -- these should still carry a surname that UnitName has stopped
+    -- returning; whichever it is becomes what the addon sends.
+    { "GetUnitName", "player" },
+    { "UnitNameUnmodified", "player" },
+    { "UnitPVPName", "player" },
     { "GetRealmName" },
     { "GetNormalizedRealmName" },
     { "UnitGUID", "player" },
@@ -830,8 +836,43 @@ local function reportSection(label, found, err)
     end
 end
 
+-- GetUnitName takes a second argument and C_PlayerInfo needs a GUID, so
+-- neither fits the flat {name, args...} table above.
+local function probeNames()
+    local out = {}
+    local function record(label, ok, ...)
+        if not ok then
+            out[label] = "errored: " .. tostring((select(1, ...)))
+        else
+            out[label] = describeReturns(...)
+        end
+    end
+    record("UnitName(player)", pcall(UnitName, "player"))
+    if GetUnitName then
+        record("GetUnitName(player,false)", pcall(GetUnitName, "player", false))
+        record("GetUnitName(player,true)", pcall(GetUnitName, "player", true))
+    end
+    if UnitFullName then record("UnitFullName(player)", pcall(UnitFullName, "player")) end
+    if UnitNameUnmodified then record("UnitNameUnmodified(player)", pcall(UnitNameUnmodified, "player")) end
+    if UnitPVPName then record("UnitPVPName(player)", pcall(UnitPVPName, "player")) end
+    if type(C_PlayerInfo) == "table" and C_PlayerInfo.GetPlayerInfoByGUID and UnitGUID then
+        local okGuid, guid = pcall(UnitGUID, "player")
+        if okGuid and guid then
+            local okInfo, info = pcall(C_PlayerInfo.GetPlayerInfoByGUID, guid)
+            if okInfo and type(info) == "table" then
+                local bits = {}
+                for _, key in ipairs({ "name", "firstName", "lastName", "surname", "fullName" }) do
+                    if info[key] ~= nil then bits[#bits + 1] = key .. "=" .. tostring(info[key]) end
+                end
+                out["C_PlayerInfo.GetPlayerInfoByGUID"] = #bits > 0 and table.concat(bits, " ") or "table with no name fields"
+            end
+        end
+    end
+    return out
+end
+
 local function runProbe()
-    local report = { addon = "3.5.0" }
+    local report = { addon = "3.6.0" }
     report.when = (date and date("%Y-%m-%d %H:%M:%S")) or tostring(time and time() or "?")
 
     local okBuild, version, build, buildDate, tocVersion = pcall(GetBuildInfo)
@@ -864,6 +905,7 @@ local function runProbe()
     -- ["events"] in the saved file, and ["probe"] sorts ahead of the real
     -- ["events"] -- so a key by that name here gets parsed as the event queue.
     report.eventRegistration = probeEvents()
+    report.names = probeNames()
 
     LanDashboardDB.probe = report
 
@@ -887,6 +929,10 @@ local function runProbe()
         print("    unavailable")
     end
     print("|cffe8a33d  map:|r " .. tostring(report.map))
+    print("|cffe8a33d  names:|r")
+    for label, value in pairs(report.names) do
+        print("    " .. label .. " -> " .. tostring(value))
+    end
 
     local refused = {}
     for _, event in ipairs(PROBE_EVENTS) do
@@ -1020,7 +1066,7 @@ local function buildConfigFrame()
 
     local version = f:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
     version:SetPoint("LEFT", title, "RIGHT", 6, -1)
-    version:SetText("v3.5.0")
+    version:SetText("v3.6.0")
 
     local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -2, -2)
@@ -1156,4 +1202,4 @@ SlashCmdList["LANDASHBOARD"] = function(msg)
     ))
 end
 
-print("|cffcd7f32LAN Dashboard v3.5.0 loaded. Type /ldb to open settings.|r")
+print("|cffcd7f32LAN Dashboard v3.6.0 loaded. Type /ldb to open settings.|r")
