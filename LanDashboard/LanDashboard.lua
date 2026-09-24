@@ -428,6 +428,18 @@ end
 -- returning a realm there, this keeps working rather than producing
 -- "Cyklades ClassicBetaPvE2".
 local function fullPlayerName()
+    -- GetUnitName(unit, false) returns the whole name already joined and
+    -- without the realm -- measured on build 70009, where UnitName gives
+    -- "Cyk" and "Alliance" separately but this returns "Cyk Alliance". Using
+    -- the client's own joining is better than reimplementing it, so it is
+    -- preferred where present; the manual path below stays for clients that
+    -- lack it, and as the thing that made the bug visible in the first place.
+    if GetUnitName then
+        local ok, joined = pcall(GetUnitName, "player", false)
+        if ok and type(joined) == "string" and joined ~= "" then
+            return joined
+        end
+    end
     local first, second = UnitName("player")
     if not first then return nil end
     if not second or second == "" then return first end
@@ -571,6 +583,9 @@ LanFrame:SetScript("OnEvent", function(self, event, ...)
         local loadedAddon = ...
         if loadedAddon == "LanDashboard" then
             LDB_ApplySavedDefaults()
+            -- Failure here is not worth a message: /ldb still opens the same
+            -- settings, so the only loss is a second way in.
+            LDB_RegisterSettingsPanel()
         end
 
     elseif event == "PLAYER_CONTROL_LOST" then
@@ -959,7 +974,7 @@ local function probeStatistics()
 end
 
 local function runProbe()
-    local report = { addon = "3.8.0" }
+    local report = { addon = "3.9.0" }
     report.when = (date and date("%Y-%m-%d %H:%M:%S")) or tostring(time and time() or "?")
 
     local okBuild, version, build, buildDate, tocVersion = pcall(GetBuildInfo)
@@ -1153,7 +1168,7 @@ local function buildConfigFrame()
 
     local version = f:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
     version:SetPoint("LEFT", title, "RIGHT", 6, -1)
-    version:SetText("v3.8.0")
+    version:SetText("v3.9.0")
 
     local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -2, -2)
@@ -1214,6 +1229,71 @@ local function buildConfigFrame()
         for _, toggle in ipairs(self.toggles) do toggle:Refresh() end
     end
     return f
+end
+
+-- Put the panel in the game's own options list as well as behind /ldb.
+--
+-- Probed rather than assumed (build 70009): Settings.RegisterCanvasLayoutCategory,
+-- RegisterAddOnCategory and OpenToCategory are all present. Retail and Classic
+-- disagree about this API and this client is neither, so the whole thing is
+-- guarded -- a client without it simply keeps /ldb, which has always worked.
+--
+-- A separate frame from the draggable /ldb window on purpose: that one carries
+-- its own background, close button and drag handling, none of which belong
+-- inside the options canvas. Both are built from the same makeToggle, so the
+-- two views cannot drift apart.
+local settingsCategory
+
+-- Global, like LDB_ApplySavedDefaults, because the ADDON_LOADED handler that
+-- calls this is defined hundreds of lines earlier in the file. A `local`
+-- declared after a closure is not visible to it, so the call would quietly
+-- resolve to nil and only fail when the event fired.
+function LDB_RegisterSettingsPanel()
+    if type(Settings) ~= "table"
+        or type(Settings.RegisterCanvasLayoutCategory) ~= "function"
+        or type(Settings.RegisterAddOnCategory) ~= "function" then
+        return false
+    end
+    local ok = pcall(function()
+        local canvas = CreateFrame("Frame", "LanDashboardSettingsCanvas", UIParent)
+        canvas.name = "LAN Dashboard"
+
+        local title = canvas:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+        title:SetPoint("TOPLEFT", canvas, "TOPLEFT", 16, -16)
+        title:SetText("LAN Dashboard")
+
+        local blurb = canvas:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+        blurb:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -6)
+        blurb:SetWidth(460)
+        blurb:SetJustifyH("LEFT")
+        blurb:SetText("What the dashboard may show about this character. " ..
+                      "Changes apply at your next sync; hidden values are never " ..
+                      "sent to the server, so they cannot appear on the dashboard.")
+
+        canvas.toggles = {}
+        local y = -70
+        for _, option in ipairs(PRIVACY_OPTIONS) do
+            local field = option.field
+            canvas.toggles[#canvas.toggles + 1] = makeToggle(canvas, y, option.label, option.hint,
+                function() return isShared(field) end,
+                function(value) setShared(field, value) end)
+            y = y - 44
+        end
+        canvas.toggles[#canvas.toggles + 1] = makeToggle(canvas, y - 10, "Show events in chat",
+            "Prints each recorded event. Useful for debugging, noisy otherwise.",
+            function() return LDB_VERBOSE and true or false end,
+            function(value) LDB_VERBOSE = value end)
+
+        -- Refreshed on show, because the same settings can be changed from
+        -- /ldb or a slash command while this panel is sitting there.
+        canvas:SetScript("OnShow", function(self)
+            for _, toggle in ipairs(self.toggles) do toggle:Refresh() end
+        end)
+
+        settingsCategory = Settings.RegisterCanvasLayoutCategory(canvas, "LAN Dashboard")
+        Settings.RegisterAddOnCategory(settingsCategory)
+    end)
+    return ok and settingsCategory ~= nil
 end
 
 local function showConfig()
@@ -1310,4 +1390,4 @@ SlashCmdList["LANDASHBOARD"] = function(msg)
     ))
 end
 
-print("|cffcd7f32LAN Dashboard v3.8.0 loaded. Type /ldb to open settings.|r")
+print("|cffcd7f32LAN Dashboard v3.9.0 loaded. Type /ldb to open settings.|r")
