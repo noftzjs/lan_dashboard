@@ -167,7 +167,8 @@ async def startup_event():
                 last_activity TEXT,
                 gold INTEGER,
                 played_total INTEGER,
-                played_level INTEGER
+                played_level INTEGER,
+                private_fields TEXT
             )
         """)
         # Migrate older databases created before these columns were tracked.
@@ -181,6 +182,13 @@ async def startup_event():
         for column in ("gold", "played_total", "played_level"):
             if column not in existing_columns:
                 await db.execute(f"ALTER TABLE player_snapshots ADD COLUMN {column} INTEGER")
+        # Which STATUS fields the player has chosen not to share, as a JSON
+        # list. A withheld field and a field we've simply never received both
+        # store NULL, so without this the two are indistinguishable -- and they
+        # should not read the same on the page ("private" is a decision, an em
+        # dash is an absence).
+        if "private_fields" not in existing_columns:
+            await db.execute("ALTER TABLE player_snapshots ADD COLUMN private_fields TEXT")
 
         # One-time cleanup: older addon/mock-generator versions stored the
         # literal string "No Guild" for guildless characters, indistinguishable
@@ -247,6 +255,7 @@ async def reload_states_from_db():
                     "gold": row["gold"],
                     "played_total": row["played_total"],
                     "played_level": row["played_level"],
+                    "private_fields": json.loads(row["private_fields"] or "[]"),
                     "stream_urls": [],
                     "tags": [],
                 }
@@ -334,6 +343,7 @@ def default_state():
         "last_updated": None, "current_zone": None, "faction": None, "guild": None,
         "class": None, "last_activity": None, "gold": None,
         "played_total": None, "played_level": None, "stream_urls": [], "tags": [],
+        "private_fields": [],
     }
 
 
@@ -485,7 +495,24 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                 parts = [p.strip() for p in rest.split(",")]
                 if len(parts) < 6:
                     raise ValueError(f"STATUS needs 6 fields, got {len(parts)}: {rest!r}")
-                level, current_xp, max_xp, gold, played_total, played_level = (int(p) for p in parts[:6])
+                # Gold is parsed on its own because it is the one field a player
+                # may decline to share: an empty slot means "withheld", which is
+                # different from absent and must not be mistaken for zero -- a
+                # character genuinely can be broke. Kept positional rather than
+                # dropped, so every field after it stays where it was.
+                #
+                # The addon does not send this yet. The server learns to accept
+                # it first on purpose: a rejected event advances the watcher's
+                # sent_count and is destroyed, so if the addon shipped first,
+                # every withheld status between the two deploys would be lost.
+                level, current_xp, max_xp = (int(p) for p in parts[:3])
+                played_total, played_level = (int(p) for p in parts[4:6])
+                private_fields = []
+                if parts[3] == "":
+                    gold = None
+                    private_fields.append("gold")
+                else:
+                    gold = int(parts[3])
                 if not (LEVEL_MIN <= level <= LEVEL_MAX):
                     raise ValueError(f"Level {level} outside valid range {LEVEL_MIN}-{LEVEL_MAX}")
                 if not (0 <= current_xp <= XP_SANITY_CEILING):
@@ -494,7 +521,7 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                     raise ValueError(f"max_xp {max_xp} outside sane range")
                 if max_xp and current_xp > max_xp:
                     raise ValueError(f"current_xp {current_xp} exceeds max_xp {max_xp}")
-                if not (0 <= gold <= GOLD_MAX_COPPER):
+                if gold is not None and not (0 <= gold <= GOLD_MAX_COPPER):
                     raise ValueError(f"gold {gold} outside sane range")
                 for label, seconds in (("played_total", played_total), ("played_level", played_level)):
                     if not (0 <= seconds <= PLAYED_MAX_SECONDS):
@@ -508,6 +535,7 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                 state.update({
                     "level": level, "current_xp": current_xp, "max_xp": max_xp,
                     "pct": pct, "last_updated": last_updated, "gold": gold,
+                    "private_fields": private_fields,
                     # A 0 here means "the addon has no answer yet" rather than
                     # "zero seconds played", so it is stored as unknown.
                     "played_total": played_total or None,
@@ -516,16 +544,18 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                 await db.execute("""
                     INSERT INTO player_snapshots
                         (player, level, current_xp, max_xp, pct, last_updated,
-                         gold, played_total, played_level)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         gold, played_total, played_level, private_fields)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(player) DO UPDATE SET
                         level=excluded.level, current_xp=excluded.current_xp,
                         max_xp=excluded.max_xp, pct=excluded.pct,
                         last_updated=excluded.last_updated, gold=excluded.gold,
                         played_total=excluded.played_total,
-                        played_level=excluded.played_level
+                        played_level=excluded.played_level,
+                        private_fields=excluded.private_fields
                 """, (player_name, level, current_xp, max_xp, pct, last_updated,
-                      gold, state["played_total"], state["played_level"]))
+                      gold, state["played_total"], state["played_level"],
+                      json.dumps(private_fields)))
                 await db.execute("""
                     INSERT INTO xp_history
                         (timestamp, player, log_type, level, current_xp, max_xp,

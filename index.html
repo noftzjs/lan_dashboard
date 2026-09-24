@@ -82,6 +82,9 @@
         .ppct { font-size: 10.5px; color: var(--text-dim); margin-top: 3px; font-variant-numeric: tabular-nums; }
         .zone { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .gold { color: #e8c37a; font-variant-numeric: tabular-nums; white-space: nowrap; }
+        /* Deliberately unlike a value and unlike an em dash: this is a choice
+           the player made, not data we are missing. */
+        .withheld { color: var(--text-dim); font-style: italic; font-size: 11px; }
         .played { color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
         /* Tags live in their own column rather than under the name: stacked
            there, a tagged row ran a line taller than an untagged one and the
@@ -366,7 +369,7 @@
                     <div class="pbar"><i style="width:${player.pct}%"></i></div>
                     <div class="ppct">${progressText(player)}</div>
                 </td>
-                <td class="gold" title="${escapeHtml(exactGold(player.gold))}">${formatGold(player.gold)}</td>
+                <td class="gold" title="${escapeHtml(goldTitle(player))}">${goldHtml(player)}</td>
                 <td class="played" title="${player.played_level ? escapeHtml(formatPlayed(player.played_level)) + " at this level" : "No playtime recorded yet"}">${formatPlayed(player.played_total)}</td>
                 <td class="zone" title="${escapeHtml(player.current_zone || "")}">${escapeHtml(player.current_zone || "—")}</td>
                 <td class="num csub">${lastSyncLabel(player)}</td>
@@ -382,7 +385,7 @@
             player.faction ? `<span class="${factionClass}">${escapeHtml(player.faction)}</span>` : "",
             player.guild ? escapeHtml(player.guild) : "",
             player.current_zone ? escapeHtml(player.current_zone) : "",
-            player.gold != null ? `<span class="gold">${formatGold(player.gold)}</span>` : "",
+            hasGoldToShow(player) ? `<span class="gold" title="${escapeHtml(goldTitle(player))}">${goldHtml(player)}</span>` : "",
             player.played_total ? `${formatPlayed(player.played_total)} played` : "",
         ].filter(Boolean).join(" · ");
         const heroTags = tagChipsHtml(player);
@@ -410,7 +413,7 @@
             player.class ? `<span style="color:${classColor}">${escapeHtml(player.class)}</span>` : "",
             player.faction ? `<span class="${factionClass}">${escapeHtml(player.faction)}</span>` : "",
             player.current_zone ? escapeHtml(player.current_zone) : "",
-            player.gold != null ? `<span class="gold">${formatGold(player.gold)}</span>` : "",
+            hasGoldToShow(player) ? `<span class="gold" title="${escapeHtml(goldTitle(player))}">${goldHtml(player)}</span>` : "",
             player.played_total ? formatPlayed(player.played_total) : "",
         ].filter(Boolean).join(" · ");
         const rowTags = tagChipsHtml(player);

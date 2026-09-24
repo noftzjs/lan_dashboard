@@ -221,6 +221,35 @@ function formatGold(copper) {
     return out.join("");
 }
 
+// A withheld field and a never-reported one both arrive as null, so the
+// difference lives in private_fields. They must not render alike: an em dash
+// reads as "no data yet", which would make a deliberate choice look like a
+// broken watcher -- and would have someone chasing a bug that isn't there.
+function isWithheld(player, field) {
+    return Array.isArray(player.private_fields) && player.private_fields.includes(field);
+}
+
+const WITHHELD_GOLD = "This player chose not to share their gold";
+
+// Returns HTML (like formatGold, which it wraps), so innerHTML only.
+function goldHtml(player) {
+    if (isWithheld(player, "gold")) {
+        return `<span class="withheld">private</span>`;
+    }
+    return formatGold(player.gold);
+}
+
+// Plain text, for title attributes.
+function goldTitle(player) {
+    return isWithheld(player, "gold") ? WITHHELD_GOLD : exactGold(player.gold);
+}
+
+// True when there is something to show at all -- either a value or a
+// deliberate refusal. Used by the layouts that omit gold entirely when absent.
+function hasGoldToShow(player) {
+    return player.gold != null || isWithheld(player, "gold");
+}
+
 function exactGold(copper) {
     if (copper === null || copper === undefined) return "No gold recorded yet";
     const parts = goldParts(copper);

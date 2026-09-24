@@ -352,7 +352,7 @@
                     <td class="num">${p.max_xp === 0 ? "MAX" : p.pct + "%"}</td>
                     <td class="num">${fmt(p.quests)}</td>
                     <td class="num">${fmt(p.deaths)}</td>
-                    <td class="num" title="${escapeHtml(exactGold(p.gold))}">${formatGold(p.gold)}</td>
+                    <td class="num" title="${escapeHtml(goldTitle(p))}">${goldHtml(p)}</td>
                     <td class="num">${formatPlayed(p.played_total)}</td>
                     <td>${escapeHtml(p.zone || "—")}</td>
                     <td>${idle ? "Idle" : "Active"}</td>
