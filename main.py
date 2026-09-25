@@ -1,5 +1,6 @@
 import contextlib
 import hashlib
+import hmac
 import io
 import json
 import logging
@@ -14,7 +15,7 @@ import aiosqlite
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -30,6 +31,9 @@ app = FastAPI(title="WoW LAN Progression Dashboard")
 # Only /roster and its editing endpoint need this — the read-only
 # leaderboard/websocket are meant for every spectator.
 roster_auth = HTTPBasic()
+# auto_error=False so a request with no header reaches the cookie check instead
+# of being rejected before it gets there.
+optional_basic = HTTPBasic(auto_error=False)
 ROSTER_USERNAME = os.environ.get("ROSTER_USERNAME", "admin")
 ROSTER_PASSWORD = os.environ.get("ROSTER_PASSWORD")
 
@@ -117,6 +121,130 @@ def public_state(state: dict[str, Any]) -> dict[str, Any]:
     return {**state, "idle_seconds": idle_seconds(state)}
 
 # --- DATABASE LIFECYCLE ---
+
+
+# --- SESSIONS AND ROLES -------------------------------------------------------
+# Two roles, which is all the separation this needs: an operator can change
+# things, a viewer can only look. Everything currently behind one shared
+# password splits along that line -- /roster edits are operator, /analytics is
+# viewer.
+ROLE_OPERATOR = "operator"
+ROLE_VIEWER = "viewer"
+VALID_ROLES = (ROLE_OPERATOR, ROLE_VIEWER)
+
+SESSION_COOKIE = "lan_session"
+SESSION_DAYS = float(os.environ.get("SESSION_DAYS", "30"))
+
+
+def session_secret() -> bytes:
+    """The key session cookies are signed with.
+
+    Derived from ROSTER_PASSWORD rather than kept separately, so changing the
+    password invalidates every existing session -- which is what an operator
+    expects changing a password to do, and means there is no second secret to
+    remember to rotate. SESSION_SECRET overrides it for anyone who wants
+    sessions to outlive a password change.
+
+    Fails closed: with no password configured there is no key, so nothing
+    validates, matching how require_roster_auth already behaves.
+    """
+    explicit = os.environ.get("SESSION_SECRET")
+    if explicit:
+        return explicit.encode("utf-8")
+    if not ROSTER_PASSWORD:
+        return b""
+    return hashlib.sha256(f"lan-dashboard-session:{ROSTER_PASSWORD}".encode("utf-8")).digest()
+
+
+def make_session(role: str) -> str:
+    """A signed `role:expiry:signature` cookie value.
+
+    Signed rather than encrypted: nothing secret is in it, and the only thing
+    that matters is that a viewer cannot edit their own cookie into an
+    operator one.
+    """
+    expires = int(time.time() + SESSION_DAYS * 86400)
+    payload = f"{role}:{expires}"
+    signature = hmac.new(session_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{payload}:{signature}"
+
+
+def read_session(raw: str | None) -> str | None:
+    """The role carried by a cookie, or None if it is missing, tampered with,
+    expired, or signed with a key that no longer applies."""
+    if not raw:
+        return None
+    secret = session_secret()
+    if not secret:
+        return None
+    payload, _, signature = raw.rpartition(":")
+    if not payload or not signature:
+        return None
+    expected = hmac.new(secret, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not safe_equals(signature, expected):
+        return None
+    role, _, expires = payload.rpartition(":")
+    try:
+        if float(expires) < time.time():
+            return None
+    except ValueError:
+        return None
+    return role if role in VALID_ROLES else None
+
+
+def hash_token(token: str) -> str:
+    """Only the hash is stored. A database or backup leak then hands over
+    nothing usable, which is the whole reason the token is shown once at
+    creation and never again."""
+    return hashlib.sha256(f"lan-dashboard-token:{token}".encode("utf-8")).hexdigest()
+
+
+def basic_credentials_ok(credentials: HTTPBasicCredentials | None) -> bool:
+    if credentials is None or not ROSTER_PASSWORD:
+        return False
+    return (safe_equals(credentials.username, ROSTER_USERNAME)
+            and safe_equals(credentials.password, ROSTER_PASSWORD))
+
+
+def _unauthorized(detail: str) -> HTTPException:
+    # Keeps the WWW-Authenticate challenge, so an operator still gets the
+    # browser's password prompt rather than a bare error page.
+    return HTTPException(status_code=401, detail=detail,
+                         headers={"WWW-Authenticate": "Basic"})
+
+
+def require_operator(request: Request,
+                     credentials: HTTPBasicCredentials | None = Depends(optional_basic)) -> str:
+    """Operator only: the password, or a session that was created with it."""
+    if not ROSTER_PASSWORD:
+        raise HTTPException(
+            status_code=500,
+            detail="ROSTER_PASSWORD is not set. Create a .env file (see .env.example) before running the server.",
+        )
+    if read_session(request.cookies.get(SESSION_COOKIE)) == ROLE_OPERATOR:
+        return ROLE_OPERATOR
+    if basic_credentials_ok(credentials):
+        return ROLE_OPERATOR
+    raise _unauthorized("Operator access required")
+
+
+def require_viewer(request: Request,
+                   credentials: HTTPBasicCredentials | None = Depends(optional_basic)) -> str:
+    """Viewer or operator. A view token gets here; the operator password also
+    does, so nothing an operator could reach before is now closed to them."""
+    if not ROSTER_PASSWORD:
+        raise HTTPException(
+            status_code=500,
+            detail="ROSTER_PASSWORD is not set. Create a .env file (see .env.example) before running the server.",
+        )
+    role = read_session(request.cookies.get(SESSION_COOKIE))
+    if role in VALID_ROLES:
+        return role
+    if basic_credentials_ok(credentials):
+        return ROLE_OPERATOR
+    raise _unauthorized("This page needs an access link or the operator password")
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initializes the SQLite database tables on server boot."""
@@ -220,6 +348,20 @@ async def startup_event():
         # value now (see the PROFILE handler below) — fix any rows already
         # written before this was corrected.
         await db.execute("UPDATE player_snapshots SET guild = NULL WHERE guild = 'No Guild'")
+
+        # Per-person access links. Only the hash is stored, so this table
+        # cannot hand out access if it leaks; the token itself is shown once
+        # when it is created.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS access_tokens (
+                token_hash TEXT PRIMARY KEY,
+                label TEXT,
+                role TEXT,
+                created_at TEXT,
+                last_used_at TEXT,
+                revoked_at TEXT
+            )
+        """)
 
         # Operator-curated metadata the game has no way of telling us:
         # a streaming link and freeform tags (group assignment, "LAN local", etc).
@@ -760,7 +902,7 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
 # set by whoever runs the dashboard, so this (unlike /api/log-update) requires
 # roster credentials.
 @app.post("/api/roster/{player_name}")
-async def update_roster_meta(player_name: str, payload: RosterMetaPayload, _user: str = Depends(require_roster_auth)):
+async def update_roster_meta(player_name: str, payload: RosterMetaPayload, _user: str = Depends(require_operator)):
     state = player_states.setdefault(player_name, default_state())
     # stream_urls wins when both are sent; stream_url keeps an older client
     # (or a stale browser tab) working by being treated as a one-item list.
@@ -812,7 +954,7 @@ async def get_dashboard():
 
 
 @app.get("/roster")
-async def get_roster_page(_user: str = Depends(require_roster_auth)):
+async def get_roster_page(_user: str = Depends(require_operator)):
     """Operator-facing roster manager for bulk-editing stream links/tags."""
     return FileResponse(os.path.join(PROJECT_DIR, "roster.html"))
 
@@ -1000,7 +1142,7 @@ def download_watcher_bundle(payload: BundleRequest, request: Request):
 
 
 @app.get("/analytics")
-async def get_analytics_page(_user: str = Depends(require_roster_auth)):
+async def get_analytics_page(_user: str = Depends(require_viewer)):
     """Progression analytics over the stored history. Behind the roster
     password while it's still being built out — gating only the page would
     hide the view but not the data, so /api/analytics is gated to match.
@@ -1037,7 +1179,7 @@ def summarise_xp_rows(rows):
 
 
 @app.get("/api/analytics")
-async def get_analytics(_user: str = Depends(require_roster_auth)):
+async def get_analytics(_user: str = Depends(require_viewer)):
     """Aggregates for the analytics page. Computed per request by reading the
     history table — fine at LAN scale (tens of thousands of rows at most); if
     this ever gets slow, cache it per DB write rather than sampling."""
@@ -1253,6 +1395,128 @@ async def get_analytics(_user: str = Depends(require_roster_auth)):
         "history": {"rows": history_total, "timed_rows": len(timed_rows)},
         "stale_after_seconds": STALE_AFTER_SECONDS,
     }
+
+
+
+
+# --- ACCESS LINKS -------------------------------------------------------------
+class AccessTokenRequest(BaseModel):
+    label: str
+    role: str = ROLE_VIEWER
+
+
+ACCESS_LABEL_MAX_LENGTH = 120
+
+
+@app.get("/access")
+async def use_access_link(request: Request, k: str = Query(..., min_length=16, max_length=200)):
+    """Exchange a link for a session, then get the token out of the URL.
+
+    The redirect is the point. A token that stays in the address bar ends up in
+    browser history, in a screenshot, and in whatever gets pasted into a chat
+    -- which is the shared-password problem again, only slower and harder to
+    revoke. It is spent here and replaced with a cookie.
+    """
+    digest = hash_token(k)
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT role, revoked_at FROM access_tokens WHERE token_hash = ?", (digest,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None or row["revoked_at"] is not None:
+            # Deliberately the same answer for "never existed" and "revoked":
+            # telling them apart would let someone probe for live tokens.
+            raise HTTPException(status_code=403, detail="This access link is not valid.")
+        await db.execute("UPDATE access_tokens SET last_used_at = ? WHERE token_hash = ?",
+                         (datetime.now(timezone.utc).isoformat(), digest))
+        await db.commit()
+        role = row["role"] if row["role"] in VALID_ROLES else ROLE_VIEWER
+
+    destination = "/roster" if role == ROLE_OPERATOR else "/analytics"
+    response = RedirectResponse(url=destination, status_code=303)
+    response.set_cookie(
+        SESSION_COOKIE, make_session(role),
+        max_age=int(SESSION_DAYS * 86400),
+        httponly=True,          # JavaScript never needs it, so it cannot leak one
+        samesite="lax",
+        secure=request.url.scheme == "https",
+    )
+    return response
+
+
+@app.post("/api/access-tokens")
+async def create_access_token(request: Request, payload: AccessTokenRequest,
+                              _user: str = Depends(require_operator)):
+    """Mint a link. The token is returned once and only its hash is kept, so
+    it cannot be looked up later -- losing one means revoking and reissuing."""
+    label = payload.label.strip()
+    if not label:
+        raise HTTPException(status_code=400, detail="A label is required (usually the person's email).")
+    if len(label) > ACCESS_LABEL_MAX_LENGTH:
+        raise HTTPException(status_code=400, detail=f"Label too long (max {ACCESS_LABEL_MAX_LENGTH}).")
+    if payload.role not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail=f"Role must be one of {', '.join(VALID_ROLES)}.")
+
+    token = secrets.token_urlsafe(32)
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute(
+            "INSERT INTO access_tokens (token_hash, label, role, created_at) VALUES (?, ?, ?, ?)",
+            (hash_token(token), label, payload.role, datetime.now(timezone.utc).isoformat()))
+        await db.commit()
+    return {"label": label, "role": payload.role,
+            "link": f"{public_base_url(request)}/access?k={token}",
+            "token": token}
+
+
+@app.get("/api/access-tokens")
+async def list_access_tokens(_user: str = Depends(require_operator)):
+    """Everything about each link except the link itself."""
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT token_hash, label, role, created_at, last_used_at, revoked_at"
+            " FROM access_tokens ORDER BY created_at DESC"
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return {"tokens": [{
+        # Enough to identify a row for revoking, not enough to reconstruct it.
+        "id": row["token_hash"][:12],
+        "label": row["label"],
+        "role": row["role"],
+        "created_at": row["created_at"],
+        "last_used_at": row["last_used_at"],
+        "revoked": row["revoked_at"] is not None,
+    } for row in rows]}
+
+
+@app.post("/api/access-tokens/{token_id}/revoke")
+async def revoke_access_token(token_id: str, _user: str = Depends(require_operator)):
+    """Cuts off one person without touching anyone else's link.
+
+    Their existing session cookie outlives this by design -- it is signed, not
+    looked up, so nothing checks the table again until the cookie expires.
+    Shortening SESSION_DAYS narrows that window; changing ROSTER_PASSWORD
+    closes it immediately for everyone, because every signature depends on it.
+    """
+    async with aiosqlite.connect(DB_FILE) as db:
+        cursor = await db.execute(
+            "UPDATE access_tokens SET revoked_at = ? WHERE substr(token_hash, 1, 12) = ?"
+            " AND revoked_at IS NULL",
+            (datetime.now(timezone.utc).isoformat(), token_id))
+        await db.commit()
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="No live access link with that id.")
+    return {"status": "revoked", "id": token_id}
+
+
+@app.post("/api/sign-out")
+async def sign_out():
+    """Drops the session cookie. HTTP Basic has no equivalent, which is one of
+    the reasons the admin area should stop using it."""
+    response = JSONResponse({"status": "signed out"})
+    response.delete_cookie(SESSION_COOKIE)
+    return response
 
 
 @app.get("/api/leaderboard")
