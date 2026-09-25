@@ -40,3 +40,11 @@ mock_generator.py
 # pytest
 .pytest_cache/
 .ruff_cache/
+
+# Local demo tooling: seeds and serves a fake-LAN database on :5001 for
+# checking pages against realistic data. Kept on the dev machine, not in the repo.
+seed_demo.py
+run_demo.cmd
+
+# Working notes and backlog, kept locally rather than on the public repo.
+BACKLOG.md

@@ -1,405 +1,96 @@
-# ⚔️ World of Warcraft Classic LAN Progression Dashboard
+# ⚔️ WoW Classic LAN Progression Dashboard
 
-An automated, lightweight, and future-proof real-time progression tracker designed for a multi-user LAN party environment. It bypasses the traditional limitations of WoW addons — which can't make network calls or write arbitrary files directly — by queuing progression events into the addon's `SavedVariables` file (flushed to disk via a self-triggered `/reload` at safe moments) and streaming them across the local network to a central visual leaderboard.
+A live leaderboard for a WoW Classic LAN party. Every player's level, XP, quests, deaths, gold and played time show up on a shared dashboard as they play, with an analytics page for the numbers behind the race.
 
----
+WoW addons can't make network calls or write files, so the data takes a detour:
 
-## 🚀 Current Architecture & Features
-
-### 1. Central FastAPI Engine
-* **Asynchronous Design:** Built using **FastAPI** and `asyncio` to seamlessly handle concurrent data packets from up to 50+ players without blocking threads.
-* **Instant Streaming:** Utilizes native **WebSockets** to broadcast game states immediately to any connected spectator browser window.
-* **Persistent Storage:** Integrated with an asynchronous SQLite database layer (`aiosqlite`). It automatically saves historical timelines and preserves individual player snapshot progress in case of server bumps or restarts.
-
-### 2. Client-Side Python Watchers
-* **`savedvars_watcher.py` (primary):** Reads the addon's `SavedVariables` file — which flushes to disk on `/reload`, unlike the chat log — and forwards queued events to the server. This is the one that actually delivers data during an active play session; see below for why.
-* **`log_watcher.py` (supplementary):** Tails `WoWChatLog.txt`. Confirmed (not assumed) that this file only flushes to disk on a full client exit, never on `/reload` — so it can't deliver anything close to live data during play. Still useful as a last-resort catch-all: whatever the addon printed ends up here once someone fully exits the game.
-* **Fail-Safe Logging:** Both watchers record every event to a local backup CSV file first, ensuring zero data loss if the central LAN server goes offline.
-
-### 3. Reactive Web Dashboard Frontend
-* **Real-Time Leaderboard:** A lightweight, framework-free single-page UI (`index.html`) featuring real-time rank updates and animated XP completion bars.
-* **Server-Safe Filters:** Search by name/guild and filter by faction/class, plus alpha/level sorting, all executed entirely in the client browser to prevent server strain.
-* **Roster Manager (`roster.html`):** Password-protected operator page for bulk-editing stream links and tags, with sortable columns — separate from the public spectator dashboard.
-
-### 4. Developer Testing Suite
-* **Simulated Ecosystem:** A local-only mock script (`mock_generator.py` — kept out of git via `.gitignore`, so it won't exist in a fresh clone) that emulates leveling characters turning in quests and logging mob kills to stress-test layout updates, plus a `--chaos` mode that injects malformed payloads to verify the server degrades gracefully.
-
-### 5. SavedVariables Watcher (`savedvars_watcher.py`)
-* Reads the addon's `LanDashboardDB.events` queue from its `SavedVariables` file and forwards new entries to the server, with a local CSV fail-safe backup and automatic retry queueing if the server is temporarily unreachable.
-* Unlike a log file, `SavedVariables` is fully *rewritten* on every save rather than appended to — this watcher re-parses the whole (small) file each poll and tracks how many of its events have already been sent, rather than tailing it.
-* Requires the addon's reload-trigger system (see `LanDashboard.lua`) to actually be flushing — check `/ldb` in-game to confirm events are queuing.
-* Configure via `savedvars_watcher_config.json` (path, server URL, poll interval) or CLI flags — see the script's docstring.
-
-### 6. Log Watcher (`log_watcher.py`)
-* Tails the WoW chat log file for lines the addon prints (`[DASHBOARD] player,TYPE,...`) and forwards them to the server. Same fail-safe backup/retry behavior as above.
-* Requires chat logging enabled in-game first (`/console logging chat 1`) — **but only delivers data when the client fully exits**, not during live play (confirmed empirically). Keep running as a catch-all safety net; don't rely on it for anything time-sensitive.
-* Configure via `watcher_config.json` (path, server URL, poll interval) or CLI flags — see the script's docstring.
-
----
-
-## 🗺️ Roadmap & Feature Backlog
-
-### Phase 1: Core Deployment (Launch Day Readiness)
-- [x] Construct the minimalist structural WoW Addon boilerplate (`.toc` and `.lua` files).
-- [x] Build the client-side log watcher (`log_watcher.py`) that tails the chat log and forwards events.
-- [x] Compile the watchers into portable, single-click Windows binaries (`.exe`) so end users don't need Python installed — see Phase 4 for the auto-discovery UX and the frozen-path bug fix that made it actually reliable.
-- [x] **Setup page with hosted downloads** (`/setup`, linked from the dashboard and roster headers): a player-facing guide covering the addon install, the watcher, how syncing works, addon commands and troubleshooting, plus download buttons for both pieces. The addon zip is built from `LanDashboard/` on every request (never stale, correct `LanDashboard/` folder nesting, versioned filename); the watcher `.exe` is served from `downloads/` with its size and SHA-256 shown on the page. On a server with no passphrase, a built-in config-file generator writes `savedvars_watcher_config.json` (server URL taken from the address the visitor is already on, plus the access token if this server requires one) entirely in the browser — the token is never sent back or stored, so friends only need to drop the file next to the `.exe`. Verified end to end: routes, zip contents byte-for-byte against source, exe checksum, the exe run with a generated config against a token-protected server (wrong token and right token), the page at desktop and phone width (found and fixed a real mobile overflow), the config download in a real browser, the missing-exe case, and the same set inside the Docker image. Also from this pass: the watcher now says so when the server refuses its token (previously it reported any HTTP error as "server unreachable", which would have sent a friend with a typo'd token in the wrong direction) and no longer repeats its "queued" line every poll while the server is refusing.
-- [x] **Passphrase-gated watcher download** (`DOWNLOAD_PASSPHRASE`, optional `PUBLIC_URL`): the setup page asks for a passphrase and returns a zip of the `.exe` + a server-generated `savedvars_watcher_config.json` (address + ingestion token) + a short README, so friends unzip and run with nothing to edit and never handle the token; the bare `.exe` route returns 403 while a passphrase is set, and the bundle endpoint 404s for everything when none is (so an unset passphrase can't leak the token). Wrong guesses: 401, then a site-wide 429 lockout after 10 in a minute. Verified: 15 gate checks (incl. behind-a-proxy `Host`/`X-Forwarded-Proto` → `https://4l.noftz.net`, zip contents byte-identical to `downloads/`, lockout), the form in a real browser (wrong guess shows the error and saves nothing; right one saves the zip), the ungated fallback, and the friend flow itself. Also hardened all three secret comparisons (roster login, ingestion token, passphrase) so a non-ASCII character gives a 401 instead of a 500.
-- [x] **Watcher runs in the system tray** (`--noconsole` build): no terminal window; a "4L" icon with a green/amber/red status dot, tooltip and menu (status, open dashboard, open log, open folder, quit), Windows notifications for problems (once per problem, not per poll), a single-instance guard, and a log file instead of console output. No prompts anywhere: with several WoW accounts it follows the most recently used, and until the addon's first save exists it re-scans every 30s. Verified against a token-protected server: 22 checks on the real tray code (statuses, one notification per problem, first-save-appears-mid-run, discovery loop, icons rendered), then the packaged `.exe` unzipped from the real bundle and run with no arguments — discovered the WoW file, delivered data, no console or window anywhere in its process tree, second copy refused, clean exit. Not verified: the icon's appearance in the actual taskbar (Windows 11 hides new tray icons under the `^` flyout, which automation can't see). Fixed in the same pass: the backup CSV was re-appended with every still-pending event on every poll while the server refused or was unreachable (a typo'd token would have grown it by hundreds of lines every few seconds).
-- [x] **Tray menu extras** (watcher): **Start with Windows** writes/removes an `HKCU\...\Run` value — one value rather than a Startup-folder shortcut, so it needs no shell plumbing and shows up in Task Manager's Startup tab where a player can also switch it off; the menu shows a live checkmark, and the registry round-trip is verified. **Choose WoW folder...** opens a native file picker on its own thread (the tray's loop owns the main thread and tkinter can't be driven from two), rejects anything that isn't `LanDashboard.lua`, restarts the queue position for the new file, and writes the choice into `savedvars_watcher_config.json` so it survives a restart.
-- [ ] Code-sign the watcher `.exe` (a certificate costs money, but it's what removes the "Windows protected your PC" warning and most antivirus false positives); until then the setup page explains the warning and shows the SHA-256.
-- [x] Setup page shows the real in-game sync button (`static/sync_screenshot.png`) in step 3, with the dismiss X explained.
-- [ ] Setup page polish, if wanted: a screenshot of the AddOns list, and a per-WoW-version note once the addon supports more than the current beta's interface number.
-- [x] Verify game client API text-streaming compatibility — confirmed `WoWChatLog.txt` only flushes to disk on a full client exit, a real WoW limitation independent of our addon/setup, not something `/console logging chat 1` alone fixes.
-- [x] **Migrate the actual `[DASHBOARD]` event data from `print()`/chat to a `SavedVariables` queue.** `LanDashboardDB.events` now carries the real data; `print()` is kept only for the player's own visual confirmation in chat.
-- [x] **Build `savedvars_watcher.py`**, the watcher that actually reads `LanDashboardDB` and forwards it to the server — verified end-to-end against a real captured `SavedVariables` sample: correct parsing (including an empty-zone edge case and empty-guild PROFILE lines), correct incremental forwarding on a second simulated reload (no resending already-delivered events), and correct resulting server-side state.
-- [x] **Removed the addon's chat output** (v2.10.0): `emit()` no longer prints every queued event — that echo dated from when the watcher read the chat log, and `PLAYER_XP_UPDATE` alone fires on every kill and quest reward, so it flooded chat during normal play. The deliberate prompts stay (sync button, first-login notice, the per-quest `Score:` line, `/ldb` output). `/ldb verbose` toggles the echo back on for debugging and persists across reloads; `/ldb` reports its state. Verified in a real Lua 5.1 runtime: events are still recorded with the echo off, the prompts still print, the toggle works both ways, and a saved setting survives a reload.
-- [ ] Redistribute the addon (currently v2.13.0 — login status sync for capped characters, death tracking, per-event in-game timestamps, no more chat spam, with `/ldb verbose` to bring it back for debugging; first-login-only sync prompt with a dismiss button; earlier: the click-to-sync button, adds class capture, guild/faction-change detection, the `"No Guild"` fix, the reload-trigger scoring system, the `SavedVariables` event queue, the click-to-sync button fix for `ReloadUI()` taint, and a fix for redundant PROFILE/ZONE re-emission on the addon's own reloads) to every player once defaults are dialed in.
-- [x] Fix the `"No Guild"` sentinel collision: the addon was sending the literal string `"No Guild"` for guildless characters, indistinguishable from a real guild actually named that. Now sends/stores empty (`None`) instead — verified a guildless player, a legitimately-named "No Guild" guild, and migration of already-stored bad rows all behave correctly.
-- [x] **Reload-trigger scoring system** (v2.6.0+): a scored safe-window system (flight path departure, AFK, loading screens) decides when to prompt for a reload — tunable live via `/run LDB_WEIGHT_QUEST = 5` etc., `/ldb` to check status. Kill-based scoring was removed (see below); quest and level-up weights carry it alone now. Still tuning default weights/thresholds with real play data.
-- [x] **Switched from self-triggered `ReloadUI()` to a click-to-sync button** (v2.8.0): a real flight path departure threw `ADDON_ACTION_BLOCKED` when the addon called `ReloadUI()` from its `PLAYER_CONTROL_LOST` handler — that event fires downstream of a Blizzard-protected action (taking a taxi), and `Reload()` is protected in at least some addon contexts (combat lockdown for certain; whether it's blocked more broadly on this beta is unverified). Safe windows now show a "Sync LAN Dashboard" button instead of reloading from inside the event handler, with a fresh `InCombatLockdown()` check at click time. **Not verified in-game:** an addon-made button's click handler is still addon code, so a click does not by itself make the call secure — if the click also throws `ADDON_ACTION_BLOCKED`, the next step is an action-button template (`InsecureActionButtonTemplate`/secure macro) instead of a plain button. `/ldb sync` force-shows the button for testing. Also removed the now-unnecessary post-combat auto-flush (`PLAYER_REGEN_ENABLED`) — the button just sits there until clicked, with a fresh combat check at click time instead.
-- [x] Diagnosed and fixed an `ADDON_ACTION_FORBIDDEN` addon-load failure: traced via a BugSack stack trace (not guessed) to `RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")` — Blizzard has removed addon access to that live API event entirely in the "Midnight" beta (interface 16001+), as part of restricting addons from using combat data to drive real-time decisions. Removed the registration and the kill-scoring weight that depended on it. The separate *file* `WoWCombatLog.txt` is confirmed still fully populated on this same beta client — only the live addon API was restricted, not the file the game engine writes to disk, so an external watcher tailing that file directly (a possible future addition for zone/activity data) is unaffected. **Checked against a real 9/18 capture (see the new-character item below): it can't serve as the source of character identity, though** — it logs every player in range (dozens of strangers on the public beta) and only marks the local player via `0x511` source flags once they act in combat, an idle login writes just a nameless `ZONE_CHANGE`/`MAP_CHANGE`, it carries no class or faction, and it isn't on unless someone runs `/combatlog` each session.
-
-- [x] **New characters now prompt for sync at login** (v2.9.0): PROFILE/ZONE were only queued in memory until SavedVariables was written, and the sync prompt is score-gated (quests/level-ups), so a fresh character had score 0 and stayed invisible until the player happened to `/reload` or log out — the "spotty" behavior. A genuine login now shows the Sync button immediately — **but only the first time the addon ever sees that character** (v2.9.1): it keeps a per-character ledger (`LanDashboardDB.known`) instead of guessing "new" from level/XP/zone, which would keep re-prompting a level-1 alt parked in the starting zone and miss a leveled character that never reached the dashboard. The button also has an X to dismiss it, and `/ldb forget` clears the ledger (do this everywhere after pointing the server at a fresh `DB_FILE`, since players would otherwise not re-register). Trade-off: a returning character no longer gets a login prompt, so if it had gone idle-hidden on the dashboard it reappears at its next sync (score-based prompt, or `/ldb sync`). `LDB_AUTO_SYNC_ON_LOGIN` (default off, `/run LDB_AUTO_SYNC_ON_LOGIN = true`) is an experiment to try a zero-click reload 3s after login; unverified on this client, and the button remains the fallback.
-- [x] **Stale cards hidden** (server + `index.html`): any accepted event (ZONE/PROFILE/XP/QUEST) stamps `last_activity` (persisted); a character with none for `STALE_AFTER_MINUTES` (default 60) is hidden from the spectator dashboard by default; an **Activity** filter next to the other filters ("Active only (N idle hidden)" / "Show all") brings them back. Characters that predate this feature have no recorded activity, so they stay hidden until their next sync. The server sends an age (`idle_seconds`) rather than a timestamp so browser/server clock or timezone differences can't skew it, and the page re-checks every 30s. Roster page still lists everyone. Caveat: this measures when the *server last heard* from a character, and delivery is reload-gated — an active player who hasn't synced within the window also drops off until their next sync.
-
-### Logged 2026-09-22 &mdash; style bugs and polish (all fixed same day)
-Reported from real play on the restyled dashboard. Diagnoses noted where already traced, so the fix is quick to pick up.
-
-- [x] **Stream icon gap in Big screen** &mdash; fixed. Badges now live in a `.stream-badges` wrapper that carries its own `margin-left` in the hero (where the line isn't flex) and are sized per context (26px hero, 22px Big-screen row, 18px Ladder).
-- [x] **Stream icon proportions** &mdash; fixed. All four redrawn on the same 24x24 grid and optically centred on (12, 12); the play triangles are positioned by their centroid rather than their bounding box, which is what made them look lopsided. Kick's placeholder letter became a real drawn glyph.
-- [x] **Zone leading number** &mdash; fixed by a startup cleanup that strips a `<10-digit>,` prefix from `current_zone`, proven against a copy of production's exact bad value (`1790125116,Ironforge` -> `Ironforge`) and confirmed not to disturb a normal zone. Runs once on boot, so deploying is the fix.
-- [x] **Big screen tags** &mdash; fixed; the hero and every pack row render tag chips.
-- [x] **Class names wear the class colour** &mdash; done in the Ladder sub-line, the Big screen hero and rows, and the analytics roster table.
-- [x] **Ladder "Lvl" header alignment** &mdash; fixed with a `table.ladder th.num` rule that outranks the generic `th` alignment; verified computed `text-align: right`.
-- [x] **Faction on Big screen pack rows** &mdash; added (`PALADIN · Alliance · Elwynn Forest`), in faction colour. Crests still a later idea.
-
-### Fixed 2026-09-23 &mdash; max-level characters stuck at level 1
-- [x] **A character that can't gain XP never reported its level** (found by a friend at the beta's level-20 cap: name, class and quests arrived, but the dashboard showed level 1). Cause: level and XP only ever reached the server via `PLAYER_XP_UPDATE`, which by definition never fires for a capped character, so the server kept its default of level 1. Fix (addon **v2.13.0**): a new `sendStatus()` emits the current level and XP at **every genuine login**, not just the first &mdash; which also re-syncs anyone who levelled while their watcher was closed. A `/reload` still doesn't re-emit it, so the queue doesn't grow for nothing.
-
-  Second half of the same bug: at the cap WoW reports `UnitXPMax` as **0**, and the server's validation demanded `1 <= max_xp`, so the honest payload would have been rejected. `max_xp = 0` is now accepted as "at the level cap" (percentage treated as complete) rather than faked into a number, and all three views say **"Level cap reached" / "at the cap"** instead of showing a meaningless percentage. Garbage is still refused: a negative max, XP above max, and an out-of-range level were all re-checked.
-
-### Logged 2026-09-22 &mdash; next session
-- [x] **`/analytics` is behind the roster password**, same as `/roster`. Both the page *and* `GET /api/analytics` are gated &mdash; gating only the page would have hidden the view while leaving the data fetchable. Verified: 401 on both without credentials, 200 with, the public dashboard/setup/leaderboard untouched, and the page still loads its own data once authenticated (the browser reuses the Basic credentials for the same-origin fetch). Reverting is deleting the two `Depends(...)` arguments.
-
-### Fixed 2026-09-23 &mdash; money, tags and column widths
-- [x] **Money reads the way it does in game.** `formatGold()` was showing only the largest unit (`234g`), throwing away the silver and copper. It now renders the full `2,345g67s89c` with each unit in WoW's own coin colour (`#ffd700` / `#c7c7cf` / `#eda55f`, verified as computed styles, not eyeballed), run together with no gap &mdash; the colour change is what separates the units, which keeps the column narrow. Leading zero units drop exactly as the in-game money frame drops them, so 87 copper reads `87c` and not `0g0s87c`. **Contract change:** `formatGold()` now returns HTML and belongs only in `innerHTML`; `exactGold()` is the plain-text form for `title` attributes and gained the raw copper total.
-- [x] **Tags sit beside the character name and no longer collapse to `+N`.** All of a character's tags render; see the uniform-row-height item above for the mechanism.
-- [x] **Zone is a fixed 140px, not a percentage.** Zone names have a known ceiling, so scaling them with the window was wrong in both directions: at the table's 1040px `min-width` floor the column fell to 122px and clipped `Stonetalon Mountains`, while at a wide viewport it inflated to ~161px of mostly empty space. Widths were measured by rendering the longest Classic zone names in the cell's own computed font rather than estimated &mdash; `Stonetalon Mountains` needs 138px including padding, and 140px covers every outdoor zone. The reclaimed percentage went to Tags (17% -> 19%), which is what let a three-tag row stop truncating. An instance name (`The Temple of Atal'Hakkar`, 161px) would still ellipsise, with the full name on the cell tooltip.
-
-### Fixed 2026-09-24 &mdash; Big screen: meta line truncated (gold and played time)
-- [x] **The meta line is cut short, usually losing played time.** Reported from the live Big screen, where a pack row read `WARRIOR &middot; Alliance &middot; Duskwood &middot; 1g78s10c &middot; 13...`. **Cause:** `.big-row .who-block` is `flex: 0 0 260px` (`index.html:143`) with `text-overflow: ellipsis` on the line, and playtime is last in the meta, so it's first to go. Measured rather than estimated: the worst case the schema allows (`WARLOCK &middot; Alliance &middot; Stonetalon Mountains &middot; 2,345g67s89c &middot; 2d 10h`) needs **358px against the 260px it gets &mdash; cut by 98px**. The 260px was chosen before gold and played time were added to that line; it fit when the line was three items, not five.
-
-  **Confirmed again 2026-09-24 by testers**, and worse than first logged: with more real characters on the board it is now eating *gold* as well as played time. Three of four pack rows were cut (`Stormwind City - 1g99s55...`, `1g16s28c - 1...`, `1g39s26c - ...`), and only the row with the shortest zone and smallest gold value survived intact. Raised in beta feedback, so it is player-visible, not just untidy.
-
-  **The space is free.** `.barwrap` beside it is `flex: 1 1 200px; min-width: 150px` and measured 371px even in a cramped 445px-wide row &mdash; on an actual projector it's ~800px. An XP bar does not need 800px to communicate 54.7%.
-
-  **Fixed 2026-09-24** at `flex: 0 1 360px`, as described below. Verified by measuring the rendered page at four widths rather than eyeballing one: at 1920, 1280 and 820px no meta line is cut, every bar starts at the same x (453px) and rows are a uniform 68px. At 400px the block shrinks to 326px rather than forcing a horizontal scrollbar -- which is the `0 1` doing its job -- and only the worst-case row ellipsises, as intended.
-
-  Worth knowing for the next person measuring this: `cdp_probe.py` sets **no viewport**, so it renders at the headless default where the row is ~445px wide and the flex row wraps. Bar-alignment numbers taken with it are meaningless; `cdp_big.py` sets an explicit viewport and switches to the Big screen view.
-
-  **Fix, with one subtlety:** raise the basis to ~360px, but make it `flex: 0 1 360px` rather than `0 0 360px`. A non-shrinking 360px block plus the bar's 150px floor overflows a phone-width row; allowing shrink lets it give the space back when there isn't any, with the ellipsis still there as the last resort. This does **not** reintroduce the ragged-bar problem that the fixed basis was added to solve &mdash; flex shrink is proportional to basis, and every row's who-block has the same basis, so they all resolve to the same width and the bars still start at a common x. Worth re-checking the bar alignment after the change anyway, since that's the property being traded against.
-
-### Shipped 2026-09-24 &mdash; the STATUS tail
-Professions, item level and AFK time all ride on `STATUS` rather than taking a log type each. Server first (`7f1ded8`), then addon v3.3.0 (`da1ea09`), then the display.
-
-**No new watcher.** Verified rather than assumed: the shipped `.exe` forwards every shape of the new payload (full tail, withheld field, empty profession list, and the old six-field form) and still rejects a truncated line. Testers do not need to re-download anything.
-
-**Three things that are easy to get wrong here**, each now covered by a test:
-- **The trailing comma after the AFK field is load-bearing.** It makes the profession list *present but empty*, which reads as "this character has none". Without it the field is *absent*, which means "an older addon that cannot report professions" &mdash; so the server would keep stale professions forever.
-- **Profession names are stripped of commas and colons before sending.** Those are the payload's own separators. A name carrying one would make the line unparseable, the server would reject it, and the event would be **destroyed**, because the watcher's `sent_count` has already advanced past it.
-- **Item level takes the second return of `GetAverageItemLevel`** (equipped), not the first (overall). Overall counts upgrades being carried rather than worn.
-
-**Known gap:** the slot number is not carried, only the order, so primaries and secondaries are not distinguishable on the page &mdash; they render as one list. Adding `:slot` to each profession field would fix it and is safe by the same reasoning as everything else here.
-
-**Testing note worth keeping.** The addon's tests stub the server and the server's tests hand-write payloads, so both could pass while the two disagree about the wire format. `test_contract.py` in the scratchpad runs the real Lua through a stubbed client and posts whatever line it actually produces to a real server. It has already earned its place: it caught `%\s` written for `%s` in the `/ldb private` pattern, which matches a literal backslash and would have meant the command never fired.
-
-### Fixed 2026-09-24 &mdash; /ldb probe was being parsed as the event queue
-- [x] **The watcher read the probe report as queued events.** `parse_events()` located the queue with `file_text.find('["events"]')` &mdash; the *first* match in the saved file. `/ldb probe` wrote `report.events` (which events can be registered), and `["probe"]` sorts ahead of the real `["events"]` at the top level, so the probe's table won.
-
-  Visible in a live watcher log as `Skipping malformed queued payload: 'ok'` / `'TRADE_SKILL_UPDATE'` / `'REFUSED: ...'`. **The skipped junk was not the damage &mdash; `sent_count` was.** The bogus counts produced every `Event count went backwards` warning in that log, and a corrupted index can skip real events. Some events were probably lost this way between the probe shipping and this fix.
-
-  Fixed in both halves: the addon renamed the key to `eventRegistration` (the fix that matters immediately, since it needs no new watcher and testers already have the old `.exe`), and the parser is now anchored to the **top-level** `["events"]` rather than the first one anywhere. Verified against both the new file shape and the old one still in the wild.
-
-  **Worth remembering:** any future sub-table inside `LanDashboardDB` that shares a name with a top-level key can do this again. The watcher fix makes it harmless, but only once a rebuilt watcher is in players' hands.
-
-### Investigated 2026-09-24 &mdash; two watcher processes (not a bug)
-Task Manager shows two `savedvars_watcher.exe` entries. Checked rather than assumed: one is a child of the other (`explorer.exe` -> pid A -> pid B, created a second apart), which is PyInstaller's `--onefile` bootloader unpacking the bundle and running the real program as a child. Only the child runs the Python, so only one acquires the lock.
-
-The single-instance guard was tested live rather than read: with the real watcher running, a second process asking for the `Local\\LanDashboardWatcher` mutex was refused, which is the behaviour that stops two watchers ever sharing one `sent_count`. Noted on the setup page too, since a tester looking at Task Manager would reasonably think something was wrong.
-
-### Reference 2026-09-24 &mdash; what this client actually exposes
-Measured with `/ldb probe` (addon v3.2.0) on `1.60.1 build 69977, toc 16001`. Recorded because this client is Classic's version numbering over retail's API surface, so neither lineage's assumptions can be carried over &mdash; and because one of ours was already wrong. Re-run the probe after any client patch; it is one command.
-
-**Available and useful now:** `GetProfessions` / `GetProfessionInfo` (see the professions item); `LoggingCombat` (unblocks damage tracking); `UnitIsAFK` and `PLAYER_FLAGS_CHANGED` (unblocks AFK time); `C_Map.GetBestMapForUnit` + `GetMapInfo`, which returned `id 1453 = Stormwind City` &mdash; **a stable map id, which would be a better zone key than the localised display string currently stored**, since `GetZoneText`/`GetRealZoneText`/`GetSubZoneText` all return translated text that differs per client language.
-
-**Newly possible stats**, none of which the dashboard tracks yet: `GetAverageItemLevel` (returned `12.5`), `GetXPExhaustion` (rested XP, returned `200`), and a full `C_QuestLog` (`GetNumQuestLogEntries`, `GetInfo`, `IsQuestFlaggedCompleted`) that is richer than the quest events currently consumed. `C_Container`, `C_CurrencyInfo`, `C_PlayerInfo` and `C_DateAndTime.GetServerTimeLocal` are all present.
-
-**Events:** 13 of 14 registered. The exception is `TRADE_SKILL_UPDATE`, which is refused as an *unknown event* &mdash; it does not exist here. Note `SKILL_LINES_CHANGED` **does** register even though `GetNumSkillLines`/`GetSkillLineInfo` do not exist, so the event outlived its companion getters; it is still usable as a "professions changed" trigger, queried through `GetProfessions`. `COMBAT_LOG_EVENT_UNFILTERED` was deliberately not probed: it is known removed, and registering a forbidden event raises the `ADDON_ACTION_FORBIDDEN` dialog that broke the addon before.
-
-**UI templates.** `UIPanelButtonTemplate` and `UIPanelCloseButton` were already proven by the sync button. `UICheckButtonTemplate` is **confirmed present** as of 2026-09-24 &mdash; the settings panel renders real checkboxes in game, not the text fallback it carries for clients that lack it. Still unprobed: whether the panel can register itself in the game's own options menu. Retail uses `Settings.RegisterCanvasLayoutCategory`, Classic used `InterfaceOptions_AddCategory`, and this client is neither, so `Settings` has been added to the probe's namespace list and the next `/ldb probe` run will answer it. Until then `/ldb` is the only way in, which the player is told on the setup page.
-
-**Statistics: measured 2026-09-24, and the earlier ruling was wrong.** This was first ruled out because `GetStatistic(60)` returned `"--"`. That was a bad read twice over: `"--"` is what a statistic with *no recorded value* returns rather than a missing API, and one hardcoded id is not evidence about 199 of them. `/ldb stats` enumerates instead, and on build 70009 the API is fully present and populated: **26 categories, 199 statistics, 23 carrying a value**.
-
-  Worth having, none of which the addon can get any other way: **`Quests completed` (id 98)** &mdash; a lifetime figure, where the dashboard's own counter only covers events seen since the addon was installed; **`Most gold ever owned` (id 334)**; **profession skill highs** (Herbalism id 1538, Tailoring id 1542); and **per-boss kill counts** (Edwin VanCleef id 63570, Bazzalan id 15027), which would make dungeon progress visible for the first time.
-
-  **`Total deaths` (id 60) is among the 176 empty**, so the statistic exists as metadata but is not being kept on this build. Deaths stay hand-counted from `DEATH` events, which is the opposite of the shortcut this was supposed to provide &mdash; the one number we most wanted is the one that is not there.
-
-  **Two cautions before building on any of it.** Money statistics come back as *display strings* carrying texture markup (`25|TInterface\\MoneyFrame\\UI-SilverIcon:0:0:2:0|t 56|T...|t`), not numbers, so anything numeric needs parsing rather than reading. And these are hardcoded achievement ids on a beta that has already changed an API return shape mid-project &mdash; each id wants checking by name against `GetAchievementInfo` rather than trusted blind, and `/ldb stats` should be re-run after a client patch.
-
-### Logged 2026-09-24 &mdash; average item level
-- [x] **Show average item level.** *(Done 2026-09-24. Equipped, not overall -- confirmed by a contract test that gives the two different values. On the Big screen it sits under the level number rather than in the meta line, which had only just been widened to stop truncating.)* Surfaced by the API sweep rather than asked for, and worth having: `GetAverageItemLevel()` is present and returned `12.5 | 12.5 | 12.5` at level 18. A gear number alongside level and played time says something the XP bar does not &mdash; two characters at the same level are not necessarily equally equipped, and in a levelling race that is a genuinely different story.
-
-  **Which of the three returns.** Retail's signature is `overall, equipped, pvp`; all three matched here because the character had nothing in its bags worth wearing. They will diverge, and **equipped is the honest one** for a dashboard &mdash; overall counts gear the player is carrying but not using, which would flatter someone hoarding upgrades they have not put on. Confirm the position rather than assuming retail's order, exactly as the profession slots had to be.
-
-  **Carry it on the `STATUS` tail**, same as professions and AFK: appended after `played_level`, ignored by an older server slicing `parts[:6]`, forwarded by an older watcher testing `len(parts) >= 8`. Safe in both deploy directions.
-
-  **Cadence:** `PLAYER_EQUIPMENT_CHANGED` registers on this client (confirmed in the sweep), but emitting on every gear swap would flood the queue during questing for a number that barely moves. The existing `STATUS` cadence (login and level-up) is the right frequency.
-
-  **Display:** the ladder is already at ten columns and tight, so this probably belongs in the Big screen meta line and the analytics roster rather than as an eleventh column &mdash; and note the Big screen meta is *already* truncating, so that item wants fixing first.
-
-### Logged 2026-09-24 &mdash; access control
-These two are the same question split in two: who is allowed to see what. Worth designing together even if they ship apart, because the answer to the second one decides how the first is built.
-
-- [ ] **Let specific people see `/analytics` without building an auth system.** People have asked to see it, and the current answer is one shared password that also unlocks `/roster` &mdash; so handing it out gives away the ability to edit things.
-
-  **Shape that stays small:** generate a long random token per person, keep it in a table with the email they gave and when it was last used, and send them `https://4l.noftz.net/analytics?k=<token>` yourself over Discord. No mail server, no signup, no password reset &mdash; if someone loses it, revoke and regenerate. The email is a label so you know whose token to revoke, not a login.
-
-  **The one detail worth getting right:** take the token out of the URL on arrival. Set a signed cookie, then redirect to the clean `/analytics`, so the link does not live on in browser history, screenshots or a shared tab. A token that survives in a screenshot is the same problem as the shared password, just slower.
-
-  Each token being separate is the whole point: you can see who is actually using it, and revoke one person without changing anything for anyone else.
-
-- [x] **Operator login** *(done 2026-09-25)*: `/login` with a form, a session cookie, sign-out on both gated pages, and rate limiting on attempts. Pages now redirect there instead of sending a `WWW-Authenticate` challenge &mdash; that header is what makes the browser show its own password box, and a credential entered there is cached with no way to clear it. Basic is still accepted when offered, so scripts and curl keep working; it is simply no longer advertised, so browsers stop caching it. The `next` parameter is validated server-side against off-site targets.
-
-- [x] **Traffic monitor** *(done 2026-09-25)*: a Traffic tab on `/roster` showing every ingest attempt, accepted or refused, newest first, with the refusal reason inline and a *Refused only* filter. History loads on arrival; new events arrive live over an operator-only WebSocket, falling back to polling every 5s for an operator signed in with a saved browser password (the socket authenticates from the session cookie, which Basic does not provide). The log is in memory and bounded (`TRAFFIC_LOG_SIZE`, default 300) &mdash; a live view, not a record. Operator-only because payload text is not public: a refused payload can carry gold its owner chose to hide.
-
-- [ ] **The rest of the admin area.** `/roster` is protected by the same credential as `/analytics` today, which means the two roles cannot be told apart. The admin area is where the operator-only things belong &mdash; roster editing, the hide/lockout toggle already logged above, report generation, and a networking tab showing live incoming traffic.
-
-  **Two roles is enough:** operator and viewer. Everything currently behind `ROSTER_PASSWORD` splits along that line.
-
-  **Drop HTTP Basic when this happens.** It has no logout: the browser keeps resending the credential and will not re-prompt, which is not a quirk but a real problem for an admin area &mdash; and it already caused confusion locally, where a cached credential looked like a broken password. A session cookie can be revoked and can expire; Basic cannot do either.
-
-  **Reuse what exists rather than inventing it:** `safe_equals` for constant-time comparison (it already handles the non-ASCII case that used to 500), and the download passphrase's lockout (10 failures in 60 seconds, then 429) as the pattern for login attempts. This is an internet-facing app now, so the admin area is where risk concentrates &mdash; worth resisting anything hand-rolled beyond a random token and a signed cookie.
-
-  **The networking tab is cheaper than it sounds.** Ingested events already fan out over a WebSocket to the dashboard; an operator-only stream of accepted and rejected payloads would reuse that path. It would also have made several of this week's problems visible immediately rather than after digging through a watcher log &mdash; the silent queue stall, the probe payloads being parsed as events, and the STATUS rejections all looked like nothing at all from the outside.
-
-### Logged 2026-09-24 &mdash; end-of-LAN report
-- [ ] **A report to close the event with: who died most, who quested most, who got there first.** The dashboard answers "what is happening"; this answers "what happened", once, at the end. It is the thing people screenshot into Discord on the Sunday night, so it is worth more than its build cost.
-
-  **Most of the data already exists.** Deaths by zone and by level, played time per level, activity per hour, professions, item level, AFK time, zone history and the game's lifetime quest count are all recorded. Candidate awards, each already answerable: most deaths (with the zone that did it); highest level, and who reached it first; fastest single level and longest grind, both from `level_times`; most time played, and most time AFK; most zones visited, now that zone history is kept; night owl, from the latest active hour; and richest, from gold.
-
-  **Freeze it.** The single most important design point: a report that recomputes on every load is not a record of the LAN, it is a live page that will disagree with the screenshot someone took. Generate it once against a time range, store the result, and serve the stored copy. That also settles what happens when a character keeps playing afterwards.
-
-  **Scope note (operator, 2026-09-24):** at the launch LAN essentially everyone rolls a fresh character and starts from level 1 at about the same time. That collapses most of the difficulty below &mdash; totals become directly comparable, and the game's lifetime quest figure *is* the LAN figure when the character did not exist beforehand. The traps are kept because they still bite in the cases that remain: an alt rolled mid-event, someone arriving late or leaving early, and the beta data as it stands today (one character reads 109 lifetime against 45 seen). Worth re-reading them when the report is built rather than designing around them now.
-
-  **Four fairness traps, all of which would produce a wrong winner:**
-  - **Gold is opt-in**, so a "richest" award silently ranks only the people who chose to share. Either drop that award or label it *among those sharing* &mdash; never present a partial field as a full ranking.
-  - **Late joiners lose every total.** Someone who rolled an alt on day two cannot win "most quests" on volume. Pair each total with a rate (per hour played) so both kinds of achievement are visible.
-  - **AFK is addon-measured and only counts since install**, unlike `/played`, which the realm vouches for. An award built on it is really "most AFK that we saw".
-  - **Quests now have two numbers** &mdash; the game's lifetime figure and what this dashboard saw. The lifetime one includes play from before the LAN, which is the wrong measure for an event award. The dashboard's own count is the right one here, which is the opposite of the choice made for the roster column, and the report should say which it used.
-
-  **Shape:** a `/report` page is the obvious form, and unlike `/analytics` it wants to be public &mdash; the whole point is sharing it. Worth considering whether it renders to an image, since a link that needs a login is not what gets posted in a channel.
-
-### Logged 2026-09-24 &mdash; beta tester feedback
-Raised by real testers after the first proper influx. Ordered smallest to largest.
-
-- [x] **Let players opt out of sharing a field, starting with gold.** *(Done 2026-09-24: server first in one deploy, then addon v3.3.0 with `/ldb private gold`. A withheld field renders as "private", not as the em dash that means "no data yet".)* Someone does not want their gold on a public board, which is fair &mdash; and the dashboard is public by design. Build it as a general opt-out set rather than a gold-specific flag, since more fields will want this (`LanDashboardDB.private = { gold = true }`, toggled with something like `/ldb private gold`). Account-wide is the right default; gold is per-character but "do not share my gold" is a per-*person* wish.
-
-  **The encoding is the hard part, and it is a deploy hazard.** `STATUS` is positional (`level,current_xp,max_xp,gold,played_total,played_level`), so a field cannot simply be dropped without shifting everything after it. Both obvious encodings are rejected by the *current* server, and rejection here is not harmless &mdash; a refused event advances `sent_count` and is **destroyed permanently**:
-  - an empty field (`...,max_xp,,played_total,...`) hits `int("")` at `main.py:488` and raises;
-  - a `-1` sentinel passes `int()` but fails `0 <= gold <= GOLD_MAX_COPPER` at `main.py:497`.
-
-  Note `0` cannot be the sentinel either: unlike `played_total`, where `0` already means "no answer yet" (`main.py:511`), a character genuinely can be broke.
-
-  **So do it in two deploys, and do the first one now.** Ship a server that maps an empty gold field to NULL *before* the addon can ever emit one. That change is inert on its own &mdash; no addon sends an empty field yet &mdash; and once it is live the addon half can ship whenever, in either order, with no window where honest data gets shredded. Trying to do both at once is what loses events.
-
-  **UI:** withheld is not the same as missing. The dashboard currently shows an em dash for "no data yet"; a deliberately private field should read differently (a lock glyph, or "private") so nobody reads a hidden value as a broken watcher.
-
-- [x] **Track professions.** *(Done 2026-09-24, addon v3.3.0, carried on the `STATUS` tail as designed below.)* A natural fit for the roster and analytics pages, and a real part of the levelling story.
-
-  **API settled by measurement, not assumption (2026-09-24, `/ldb probe` v3.1.0).** The client reports `1.60.1 build 69977 toc 16001` -- Classic's *version numbering* with retail's *API surface*, which is why neither lineage's habits transfer. Present: `GetProfessions`, `GetProfessionInfo`, `C_TradeSkillUI`. **Absent: `GetNumSkillLines`, `GetSkillLineInfo`, `ExpandSkillHeader`** -- the entire Classic skill-list path this item originally proposed does not exist here. Live return on a real character: `Herbalism 71/150`, `Tailoring 103/150`, `First Aid 1/75`, `Cooking 1/75`.
-
-  **So build the retail path only.** An earlier note here suggested trying retail and falling back to the skill list; that fallback would be dead code against a client where the fallback API is confirmed missing. Keep `/ldb probe` instead -- it is the thing that makes a future API change diagnosable in one command rather than a debugging session, which is worth more than speculative branches. This beta has already removed one API mid-project.
-
-  **Slot semantics, answered (v3.2.0 probe).** Live return: `slot1 Herbalism 71/150 (book index 6)`, `slot2 Tailoring 103/150 (book index 8)`, `slot3 First Aid 1/75 (book index 5)`, `slot4 (empty)`, `slot5 Cooking 1/75 (book index 7)`. So the client keeps retail's *shape* (`prof1, prof2, _, _, cooking`) but fills the secondary slots with Classic's set: **slots 1-2 are the primaries, slots 3-5 the secondaries**, with First Aid sitting where retail puts archaeology. Slot 4 is empty on this character and is almost certainly Fishing by elimination &mdash; unconfirmed, and a character who has Fishing would settle it in one probe run.
-
-  **Gotcha worth keeping:** the slot number and the spellbook index are different numbers, and here they do not even correlate (slots 1,2,3,5 returned indices 6,8,5,7). Always pass the returned index to `GetProfessionInfo`, never the slot.
-
-  **Carry it on `STATUS` as a variable-length tail, not a new log type.** Unchanged by the above, and it matters here because professions vary in number. Appending `Herbalism:71:150,Tailoring:103:150` after `played_level` keeps the watcher happy (it tests `len(parts) >= 8`, and more fields still pass) and an older server ignores the tail because it slices `parts[:6]`. A new `PROFESSION` log type would instead be destroyed outright by any watcher that predates it. Storage wants a JSON `professions` column on `player_snapshots` plus a migration.
-
-  **Cadence:** emitting on the existing `STATUS` cadence (login and level-up) is enough for a dashboard and adds no new queue pressure. Professions change slowly; nothing here needs its own event.
-
-- [ ] **Damage done &mdash; only possible via the watcher, and it is a much bigger job than it sounds.** A tester asked for it. The instinct to offload it to the watcher is not merely an optimisation &mdash; **it is the only route that exists**, and that is already established in this project: `COMBAT_LOG_EVENT_UNFILTERED` was removed from addon access on this beta (interface 16001+), so the addon cannot see combat data at all. The separate `WoWCombatLog.txt` file was confirmed still fully populated on the same client, which is why the watcher is the only thing that can do this.
-
-  **What the earlier investigation already found about that file**, all of which lands on this feature: it is not on unless `/combatlog` is run each session &mdash; **and the 2026-09-24 sweep confirms `LoggingCombat` survived the API cull** (present, and reporting `false` for the current state), so the addon can enable it automatically and that blocker is gone; it logs every player in range, which on a public beta is dozens of strangers; and it identifies the local player only through `0x511` source flags once they act in combat. That last point has a neat answer here &mdash; the watcher already knows which characters belong to this player from `SavedVariables`, so it can match by name rather than decoding flags.
-
-  **Scope honestly.** This is a second ingestion pipeline (incremental file tailing, combat-log parsing, local aggregation), not an increment on the existing one, and combat logs grow by megabytes an hour. Sending aggregates rather than events is right. The watcher already tails incrementally for `SavedVariables`, so the pattern exists to copy.
-
-  **Worth a product decision before any of that:** this is a levelling race to 20, and damage done is a raid-meter stat. It may not tell the story the dashboard is for &mdash; deaths, pace and time played probably say more about a levelling journey than DPS does. Cheap to defer, expensive to build.
-
-### Logged 2026-09-23 &mdash; load testing the live server
-- [ ] **Prove the self-hosted box survives a full LAN before the LAN, not during it.** Launch is 2026-11-04 and the setup has never seen more than a handful of real clients.
-
-  **Test the right thing.** Raw request throughput is not the risk here &mdash; ingestion is reload-gated, so it arrives in small infrequent bursts. Two real characteristics are, and both were read out of the code rather than guessed:
-
-  1. **Broadcast sits inside the ingestion request, and it's serial.** `ConnectionManager.broadcast()` is a `for` loop that `await`s `send_json` one connection at a time, and `POST /api/log-update` `await`s the whole thing after its commit. So ingestion latency grows *linearly with the number of open dashboards*, and one slow consumer (a friend on hotel wifi, a laptop that slept) stalls every spectator behind it in the list plus the watcher waiting on the POST. This is the most likely thing to fall over and the specific hypothesis the test should target: hold N sockets open, make one of them deliberately slow, and watch ingestion p95. If it's confirmed, the fix is to stop awaiting fanout in the request path &mdash; `asyncio.gather` the sends at minimum, or give each connection its own bounded queue and drop for a consumer that can't keep up.
-  2. **SQLite serialises writes.** Concurrent POSTs queue behind each other, and `database is locked` is the failure mode to watch for rather than a slow response.
-
-  **Two different tests, two different answers.** Against the container directly, you measure the app. Through the Cloudflare Tunnel, you measure the tunnel &mdash; which is also worth knowing, since the tunnel has its own concurrency behaviour and a WebSocket idle timeout that the dashboard's reconnect logic should be verified against (a LAN has quiet stretches; a socket that dies after a few idle minutes and doesn't come back is a real launch-day bug and won't show up in a busy test). Keep the through-the-tunnel run modest and realistic; hammering your own hostname is a good way to meet Cloudflare's abuse protection.
-
-  **Point it at a throwaway database.** This is the one that will hurt if it's missed: the ingestion path writes real rows, so a load test against production permanently seeds the live roster with junk characters, and `player_snapshots`/`xp_history` are what the dashboard and analytics read. Deploy a second instance with its own `DB_FILE`, or accept that the volume has to be wiped afterwards.
-
-  **Sizing:** decide the real number first (players with watchers, plus spectators with a tab open) and test 3-5x it. "Does 5x my actual LAN hold" is a useful answer; "where does it break" mostly isn't. Tooling: Locust keeps it in the Python venv that already exists and can drive HTTP and WebSockets in one scenario; k6 gives nicer percentiles if the extra install is fine.
-
-### Logged 2026-09-23 &mdash; analytics deep dive
-- [ ] **Build the analytics tooling now so it's ready when the data arrives.** Six panels exist (*At a glance*, *Quest XP vs everything else*, *Where the quest XP comes from*, *The hill ahead*, *Race to 60*, *Roster*).
-
-  **The gap is time.** `analytics.html` contains no reference to `event_time` or `timestamp` &mdash; not one panel plots anything against a time axis, so the page can say where characters *are* but nothing about how they got there. That's the whole story of a progression race. `event_time` was added to `xp_history` in addon v2.11.0 precisely to make this honest: it records when something happened in game, not when the reload-gated delivery reached the server, so a pace chart isn't distorted by someone syncing six hours late. It is currently unused by the analytics page. **Caveat already noted at `main.py:144`:** rows written before that migration have `event_time` NULL, so every time-series query needs to exclude them rather than treat NULL as epoch.
-
-  **Charts the current schema can already support**, roughly in order of payoff: level over time, one line per character (the race, and the reason `event_time` exists); time spent per level, which is where the grind actually shows and reads well as small multiples; gold over time, now that `xp_history` carries it; deaths by zone and by level; and quest XP share per character, which extends a panel that already exists.
-
-  **Two constraints to design against.** With a handful of characters, small multiples beat one crowded multi-series chart &mdash; and the dashboard's own audience is a projector at a LAN, so legibility at distance matters more than density. And **class colours must not be used as chart marks**: they were measured against each other earlier in this project and fail CVD separation (several WoW class colours are indistinguishable to a colourblind viewer, and some are too close even in full colour). They're fine as *text* labels, which is how the ladder already uses them. A chart with more than one series takes a validated categorical palette for its lines and puts the class colour on the label beside it. Also no dual-axis charts &mdash; gold and XP on one plot means two charts or an indexed common base.
-
-### Logged 2026-09-23 &mdash; AFK time
-- [x] **Track how long a character has spent AFK.** *(Done 2026-09-24, addon v3.3.0. Shown on the hero card and the analytics roster, labelled as addon-measured.)* A "time spent standing in Ironforge" number alongside `/played` &mdash; a journey stat, not a moderation one.
-
-  **Signal (confirmed available, 2026-09-24 sweep: event registers, `UnitIsAFK("player")` returns a real value):** `PLAYER_FLAGS_CHANGED` (registered for `player`) fires on every AFK transition, and `UnitIsAFK("player")` reads the current state. That covers both `/afk` and the client's own auto-AFK, which is the majority of it; there's no polling and no timer. Accumulate the elapsed seconds into `LanDashboardDB` on the *leaving*-AFK edge, and flush any open interval at logout so a session that ends while AFK still counts.
-
-  **Carry it on `STATUS`, not as a new log type.** This matters for deployment. A new log type is the dangerous change: an older watcher doesn't skip an unknown type harmlessly &mdash; `is_well_formed()` returns False, the event is dropped as malformed, `sent_count` advances past it, and it is **destroyed permanently**. Appending a seventh field to `STATUS` is safe in both directions instead, and both halves were checked rather than assumed: the watcher tests `len(parts) >= expected_min_fields["STATUS"]` (8), so a nine-field line still forwards, and the server slices `parts[:6]`, so an older server ignores the extra field rather than rejecting the line. That means the addon can ship before or after the server without losing data &mdash; the one change so far where the order doesn't matter.
-
-  **Caveat worth stating on the page:** unlike `/played`, which WoW's own server is authoritative for, this total is computed by the addon and lives in `SavedVariables` &mdash; so it resets if that file is wiped (as it was on 9/23) and it only counts time since the addon was installed. And because delivery is reload-gated, this can only ever be a *cumulative* stat; "is AFK right now" isn't knowable live and shouldn't be implied by the UI. It's also distinct from the existing idle/stale hiding, which measures when the **server** last heard from a character, not what the player was doing.
-
-### Logged 2026-09-23 &mdash; moderation
-- [ ] **Hide or lock out a character from the roster page.** Anyone can name a character anything, and that name reaches a public dashboard the moment their watcher syncs &mdash; so the operator needs a way to take one off the board without waiting on the player. Shape: a per-character toggle on `/roster` (which is already password-protected), stored alongside the existing roster metadata, that removes the character from the public dashboard and from `/api/leaderboard`.
-
-  Worth settling when it's built: **hidden vs blocked**. *Hidden* keeps accepting and storing the character's events but stops showing them, so unhiding restores full history &mdash; the right default for "that name is a bit much". *Blocked* also refuses new events at ingestion, which is what you'd want for someone spamming junk, but it throws data away. Both are cheap; the distinction matters more than the mechanism. Either way the roster page must still list hidden characters (greyed, with the toggle) or they become unrecoverable, and the analytics page should probably keep counting them since it's behind the same password.
-
-### Logged 2026-09-23 &mdash; ladder & big-screen layout (all fixed same day)
-Reported from the live dashboard. Causes confirmed in `index.html`, so these are quick to pick up.
-
-- [x] **Big screen: XP bars line up.** The name/meta block got a fixed flex basis (260px) with `min-width: 0`, so every bar starts at the same x and a long name ellipsises instead of shoving the bar right. Verified: all bars at the same left edge.
-- [x] **Ladder: dead space reclaimed.** The table moved to `table-layout: fixed` with an explicit `<colgroup>`, so the browser no longer hands leftover width to whichever columns it likes. Faction is now 74px, and the space went to two new columns: **Gold** and **Played**.
-- [x] **Ladder: rows are a uniform height.** Tags moved out of the Character cell into their own column, where the row is `flex-wrap: nowrap` and each chip is `flex: 0 1 auto` with a 42px floor &mdash; so the chips share the column, shrink proportionally to their own length (a long tag gives up room before a short one does) and ellipsise what doesn't fit, instead of wrapping to a second line. Every tag stays visible; only the text inside an over-long one is cut, with the full value on that chip's tooltip. Two other things were making rows uneven and got fixed too: stream badges were taller than the text line (pinned to an 18px line box, badges 16px), and the tag chips had no flex container so they wrapped in the narrow column. Measured after the fact: all rows 49px, including one carrying a 27-character tag.
-
-### Logged 2026-09-22 &mdash; new features
-- [x] **Multiple tags, capped at 3** &mdash; `TAGS_MAX_COUNT` lowered from 10 to 3 on both the server and the client; a fourth tag is dropped server-side (verified).
-- [x] **Multiple stream links per player** &mdash; `player_roster_meta` gained a `stream_urls` JSON column, migrated from the old single `stream_url` (which is still written, so a rollback reads fine, and still accepted on input for a stale browser tab). Capped at 3, edited as a comma-separated field on the roster page, and rendered as one badge per link with per-link platform detection.
-
-### Phase 2: Enhanced Visual Analytics
-- [x] **Per-event in-game timestamps** (addon v2.11.0 + server): the addon now stamps every event with `GetServerTime()` (falling back to `time()`) as it queues it, inserted right after the log type — `Player,XP,<epoch>,level,cur,max` — where the field is always a bare number, since the trailing fields (zone, guild) are free text that may contain commas. The server sniffs that slot (a 10-digit integer inside a sane date range) so **pre-2.11.0 addons keep working unchanged**, and stores it in a new `xp_history.event_time` column alongside the existing delivery `timestamp`. **Why this mattered:** the only clock before was the watcher's POST time, so 594 XP rows collapsed into 42 distinct seconds — an entire evening landing on the handful of instants a player happened to sync at, which made every time-axis chart meaningless. Verified: 44/44 addon checks in a real Lua 5.1 runtime (stamp position, comma-containing guild names still surviving as the remainder, `time()` fallback), 16/16 server checks (new format, old format, a 9-digit quest id not mistaken for a stamp, an out-of-range number left as data, and one delivery batch yielding four distinct event times), plus the schema migration against a copy of the live database (648 rows preserved, column added, historical rows correctly NULL). Known limit, deliberately accepted: a ZONE whose entire name is a 10-digit number in the plausible-date range would be read as a stamp — no real zone is.
-- [x] **Level Velocity Charts** — the "Race to 60" panel on `/analytics`, drawn from `event_time`. Hand-rolled inline SVG rather than a charting library, keeping this project's no-runtime-CDN rule. Only characters with at least two separately-timed events get a line, so it stays empty until people play on addon v2.11.0+.
-- [x] **XP Composition Breakdowns** — the quest-vs-other panel on `/analytics` (a stacked bar, not a pie: part-to-whole across several characters reads better as bars, and two slices never justify a pie). Quest XP is what the game reported; "other" is inferred total minus that, floored at zero.
-- [ ] **LAN Milestone Announcements:** Integrate global toast alerts whenever someone hits a milestone level (e.g., *"Leeroy has reached Level 20!"*).
-- [ ] **Playtime tracking:** Capture `/played` and log it alongside each level-up for richer historical data (time-to-level, not just XP-to-level).
-- [x] **Deaths tracked** (addon v2.12.0 + server + analytics): `PLAYER_DEAD` emits `name,DEATH,<epoch>,level,zone` — level and zone ride along so the dashboard can say *where* someone died without correlating against ZONE events that may not have fired (dying twice in one zone emits no new ZONE event). Server validates level/zone like every other payload, stores a history row, and `/api/analytics` returns per-character and total counts; the page has a Deaths tile and a Deaths column. Both watchers accept the new type, with and without the timestamp.
-- [x] **Gold and time played** (addon **v3.0.0**, branch `jn/addon-v3`): a new `STATUS` payload carries level, XP, gold and playtime together — `name,STATUS,<epoch>,level,xp,maxxp,gold,played_total,played_level`. They're sampled as one snapshot at login and on level-up rather than chased individually, because neither has a change event worth subscribing to: gold moves on every loot and vendor sale, and playtime only exists when asked for. Gold is stored in **copper**, so converting to g/s/c stays the dashboard's job and no precision is lost. A playtime of 0 is stored as *unknown* rather than "zero seconds", so it can't drag an average down.
-
-  Playtime is asynchronous (`RequestTimePlayed()` → `TIME_PLAYED_MSG`), so login now asks and emits the snapshot when the answer lands, with a 5-second timer so a lost reply still sends the snapshot instead of dropping it. That request also makes the server print the usual `/played` lines to chat — suppressed, but **only for requests this addon made**, matched against the game's own localised templates so a player typing `/played` still sees their answer.
-- [ ] **More per-character data points (remaining):** and other counters worth showing on cards or in the analytics view (candidates: gold, quests completed, professions, kills-by-type — anything that's cheap for the addon to read and safe from the Midnight-era API restrictions, since the combat log event is off-limits to addons on this client). Each new field means an addon change, a new `log_type` (or extended PROFILE) in the ingestion parser with the same validation treatment as existing fields, a DB column migration, and a card/roster display decision.
-- [x] **Data analytics dashboard** (`/analytics`, linked from every page): six panels over the stored history — a headline KPI row, quest-XP-vs-everything-else per character (bar length is total XP so characters compare, split shows each one's mix), share of quest XP by reward size, what each level costs with the leader's position marked, level-over-time once events carry an in-game clock, and a full roster table. Backed by `GET /api/analytics`, which walks the history per request (fine at LAN scale; cache per write if it ever gets slow). Chart colours come from a palette validated against the panel surface, **not** WoW class colours. Seven panel concepts mocked up with real figures, grouped by build cost: https://claude.ai/artifact/XDFFvESJJ9mnqdho41khZw — panels 1-5 are buildable on stored data today; 6-7 needed the event timestamps above. Chart colours must come from a validated palette, **not** WoW class colours: measured against the `#1e1e24` panel surface, Warrior tan vs Paladin pink sit at ΔE 14.6 (below the 15 floor for ordinary colour vision) and Priest white reads as grey — class colour belongs on identity chips beside names, while faction blue/red is fine on marks (ΔE 29.0).
-
-### Phase 3: Infrastructure Expansion
-- [x] Class colors (standard WoW class palette, used on both the dashboard cards and the roster table).
-- [ ] Level-up timestamps and server alerts.
-- [ ] Build a web UI configuration screen to toggle server visualization profiles (Classic Era, Hardcore, Progression).
-
-### Phase 4: Public/Self-Hosting Readiness
-Everything here is scoped for the current trusted-LAN deployment and deliberately deferred — revisit before exposing this to anyone outside the LAN.
-- [ ] Deploy to Coolify (self-hosted) and validate that players *not* on the local LAN can actually reach and post data to it over the internet — this is the point where the two items below stop being deferrable.
-- [x] Authenticate `/api/log-update` with a shared `INGESTION_TOKEN` (set as an env var on the server, passed as `--ingestion-token`/`ingestion_token` config on every watcher, sent as the `X-Ingestion-Token` header). Fails open — endpoint stays wide open exactly as before — when `INGESTION_TOKEN` is left unset, so a LAN-only deployment needs no config change. Verified end-to-end on an isolated test server/port: missing or wrong token → `401`, correct token → `200`, unset server-side token → `200` regardless of header. Set this before exposing the server beyond a trusted LAN — e.g. once it's on Coolify.
-- [x] Package `savedvars_watcher.py` and `log_watcher.py` into standalone `.exe`s via PyInstaller (`pyinstaller --onefile --console --name <name> --distpath dist --workpath build --specpath build <script>.py`) so remote friends don't need Python installed. Added auto-discovery (scans `<WoW Install>\_*_\WTF\Account\*\SavedVariables\LanDashboard.lua` across every drive letter) so a friend can just double-click the `.exe` with zero flags — one match is used automatically, multiple matches get a numbered picker, zero matches falls back to a plain-language prompt. Caught and fixed a real frozen-`.exe` bug in the process: both scripts located their config/state/backup files via `__file__`, which under PyInstaller resolves inside a temp extraction folder that's deleted on exit — every run silently lost its state and backup CSV. Fixed by resolving against `sys.executable` when frozen instead, verified by rebuilding and confirming `.savedvars_watcher_state.json`/`savedvars_watcher_backup.csv` actually land next to the `.exe` across repeated runs.
-- [x] `Dockerfile` added and verified locally: built the image, ran it with a mounted volume + `INGESTION_TOKEN`/`ROSTER_*` env vars, confirmed the dashboard serves and the ingestion token is enforced through the container exactly as it is running natively, then confirmed the SQLite DB survives both a `docker restart` and a full `docker rm` + recreate against the same named volume (the actual shape of a Coolify redeploy) — without a persistent volume, that step would silently wipe all progression data. See the Dockerfile deployment note below for the required Coolify volume setting.
-- [ ] HTTPS/WSS support, so the roster password and game data aren't sent in the clear.
-- [ ] Revisit player-identity keying (currently by character name alone). **Partly measured on 2026-09-24** (`/ldb probe` v3.2.0), and the result cuts both ways:
-  - **Character names now contain spaces.** `UnitName("player")` returned `Cyk Alliance`, and every real tester name on the board is two words (`Ytzw Ww`, `Kaede Windjammer`, `Thanatu Mournveil`, `Port Vehx`). A space in a character name is impossible under the old rules, so the first/last-name model is live on this client, not merely upcoming. Checked as a consequence: `playerElementId()` and the roster fetch both already run names through `encodeURIComponent`, so DOM ids and URLs are safe &mdash; but that is now load-bearing rather than incidental, and anything new that builds an id, URL or selector from a name has to keep doing it.
-  - **Realm has not gone away.** `UnitFullName` returned `Cyk Alliance | ClassicBetaPvE2`, with `GetRealmName` = `Classic Beta PvE 2` and `GetNormalizedRealmName` = `ClassicBetaPvE2`. So the "single server, no realms" half of the assumption is wrong here, at least on beta, and a `(full name, normalized realm)` key is available **today** &mdash; the addon just is not sending realm. `C_PlayerInfo.UnitIsSameServer` also exists.
-  - Still unconfirmed: whether beta realms survive to launch, and the PVP/PVE/RP per-character setting. Worth re-probing nearer 2026-11-04 rather than designing around a beta artifact.
-- [ ] Guild-name identity has the same shape of problem: the guild filter dropdown treats guild name alone as unique, but two different guilds (one Horde, one Alliance) can share a name today, which would incorrectly merge them into one filter option. Needs disambiguation by (faction, guild name) — or may be moot once "WoW Forever" ships, if its single-server model makes guild names globally unique. Confirm before assuming either way.
-- [x] **Backend test suite** &mdash; 75 tests under `tests/`, run with `python -m pytest`. Four modules: `test_ingestion.py` (payload parsing, comma-bearing guild/zone names, every validation rule, the level cap, event-time sniffing, deaths), `test_auth.py` (all three auth mechanisms and their deliberate failure directions, plus the passphrase bundle and its rate limit), `test_roster_and_analytics.py` (tag/stream caps, legacy single-link clients, and the analytics arithmetic &mdash; level-crossing XP, observed-only level counts, quest bands, velocity), `test_migrations.py` (every startup migration against a database built in an older shape, including that they're idempotent and preserve rows).
-
-  `tests/conftest.py` builds a fresh app per test with its own SQLite file, and **stubs out `load_dotenv` so results never depend on the developer's own `.env`** &mdash; without that, a test unsetting `ROSTER_PASSWORD` to check the fail-closed path would silently get the real one back. Config is read into module-level constants at import, so each configuration means a fresh `importlib.reload`.
-
-  The suite was **mutation-checked**: six deliberate regressions (rejecting capped characters again, raising the tag cap, disabling event-time sniffing, skipping the ingestion-token check, un-gating analytics, and stamping activity on rejected payloads) were each confirmed to make it fail. One test was rewritten after that exercise &mdash; it had been comparing `idle_seconds` values microseconds apart and would have passed by luck.
-
----
-
-## 🛠️ Step-by-Step Project Setup
-
-### 1. Installation
-Clone or download the project environment and deploy the primary system package pipeline:
-```bash
-pip install -r requirements.txt
 ```
-Copy `.env.example` to `.env` and set a real `ROSTER_PASSWORD` — this protects the `/roster` management page from anyone else on the LAN. Without it set, requests to `/roster` and its editing endpoint fail rather than silently becoming public.
+LanDashboard addon ──► SavedVariables file ──► watcher (on each PC) ──► server ──► browser dashboards
+  queues events          flushed on /reload       reads & forwards        stores, broadcasts over WebSocket
+```
 
-Also set `DB_FILE` in `.env` to segment mock/beta/live data into separate SQLite files (e.g. `DB_FILE=beta.db`) — defaults to `lan_progression.db` if unset. Switching it doesn't touch whatever the previous value pointed at, so old data (like the beta run) just sits there for reference until you point somewhere new.
+## What's in the repo
 
-If this server is reachable by anyone outside a trusted LAN (e.g. hosted on Coolify for remote friends), also set `INGESTION_TOKEN` in `.env` and give every player's watcher the same value via `--ingestion-token` — otherwise anyone who finds the URL can post fake data. Leave it unset for a LAN-only deployment; `/api/log-update` stays open exactly as before.
+| Path | What it is |
+|---|---|
+| `LanDashboard/` | The in-game addon. Queues events and triggers a `/reload` at safe moments so they reach disk. Has an in-game settings panel and `/ldb` commands. |
+| `savedvars_watcher.py` | Runs on each player's PC. Reads the addon's SavedVariables file and forwards new events to the server, with a local CSV backup and retry queue. Ships as a system-tray `.exe`. |
+| `log_watcher.py` | Optional fallback that tails `WoWChatLog.txt`. That file only flushes when the game fully exits, so it is a catch-all, not a live feed. |
+| `main.py` | FastAPI server: ingestion, SQLite storage, WebSocket broadcast, and every page below. |
+| `*.html`, `static/` | The pages. No build step and no framework; d3's scale modules are vendored under `static/vendor/d3/`. |
+| `tests/` | pytest suite. Runs in-process against a throwaway database per test. |
 
-### 2. Run the Framework Stack
-Fire up the central ingestion backend and database engine:
+**Pages:** `/` the dashboard (ladder and big-screen views) · `/analytics` charts and per-character stats · `/roster` operator tools: roster edits, viewer access links, live ingest traffic · `/setup` player downloads and instructions · `/login`.
+
+## Run it locally
+
 ```bash
+python -m venv .venv
+.venv\Scripts\activate            # source .venv/bin/activate on macOS/Linux
+pip install -r requirements.txt
+copy .env.example .env            # then set a real ROSTER_PASSWORD
 python main.py
 ```
 
-### 3. Open the Spectator Interface
-Browse to `http://<server-ip>:5000/` from any machine on the LAN — the server hosts the dashboard directly, no file copying needed. Ensure the connection badge displays a green **"Live Connected"** status indicator.
+Open `http://<server-ip>:5000/`. The status badge turns green (**Live Connected**) once the page's WebSocket is up.
 
-### 4. Forward Real Game Data
-On each player's machine, run the SavedVariables watcher pointed at the dashboard server's LAN IP — this is the one that actually delivers data during live play:
+To send real game data to a local server rather than the hosted one, run the watcher from source in console mode. It keeps its own state next to the script, so it can run alongside the tray `.exe`:
+
 ```bash
-python savedvars_watcher.py --savedvars-path "C:\...\WTF\Account\YOURACCOUNT\SavedVariables\LanDashboard.lua" --server-url "http://<server-ip>:5000/api/log-update"
-```
-That file only appears after the addon has saved at least once (log in, then `/reload`). Use an IP address, not a hostname like `localhost` — on Windows, resolving `localhost` can add multi-second delay per connection.
-
-If the server has `INGESTION_TOKEN` set (a remote/Coolify deployment), add `--ingestion-token <the same value>` to every watcher invocation below — omit it entirely for a LAN-only server.
-
-Optionally, also run the chat-log watcher as a catch-all safety net (it only delivers a batch when someone fully exits the game, not during play, but costs nothing to leave running):
-```bash
-python log_watcher.py --log-path "C:\...\Logs\WoWChatLog.txt" --server-url "http://<server-ip>:5000/api/log-update"
+python savedvars_watcher.py --savedvars-path "C:\...\WTF\Account\<ACCOUNT>\SavedVariables\LanDashboard.lua" --server-url "http://127.0.0.1:5000/api/log-update"
 ```
 
-### 5. Package the Watcher for Remote Friends (Optional)
-Friends who aren't on the LAN and don't have Python installed run a standalone `.exe` instead. The server hosts it for download on its `/setup` page, straight from the `downloads/` folder, so build it there:
+Use an IP address, not `localhost`. On Windows, resolving `localhost` can add seconds to every request.
+
+## Configuration
+
+Set in `.env` locally, or in the host's environment settings when deployed. `.env.example` has the details.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ROSTER_USERNAME` / `ROSTER_PASSWORD` | `admin` / *none* | Operator login. With no password set, operator pages refuse everyone rather than going public. |
+| `DB_FILE` | `lan_progression.db` | SQLite file. Use a different file per event (beta, launch) so their data never mixes. |
+| `INGESTION_TOKEN` | *unset (open)* | Shared secret every watcher must send. **Required once the server is reachable from the internet.** |
+| `DOWNLOAD_PASSPHRASE` | *unset* | Gates the watcher download on `/setup`. Friends enter it and get a zip with the `.exe` and a ready-made config, so they never see the token. |
+| `PUBLIC_URL` | *from request* | Address written into that bundled config, e.g. `https://4l.example.net`. |
+| `STALE_AFTER_MINUTES` | `60` | How long without events before a character drops off the dashboard. |
+| `SESSION_DAYS` | `30` | How long an operator or viewer sign-in lasts. |
+| `SESSION_SECRET` | *derived from password* | Signs session cookies. Changing `ROSTER_PASSWORD` already signs everyone out; set this only to rotate independently. |
+| `TRAFFIC_LOG_SIZE` | `300` | Ingest attempts kept in memory for the Traffic tab. |
+
+## Players
+
+Players only need the `/setup` page. It walks them through installing the addon and downloading the watcher. Remote friends without Python get the tray `.exe`, which finds the SavedVariables file on its own.
+
+### Building the watcher `.exe`
+
+Rebuild whenever `savedvars_watcher.py` changes. The server serves whatever file is in `downloads/` and can't build it itself: PyInstaller only targets the OS it runs on, and the server runs Linux.
+
 ```bash
 pip install -r requirements-watcher.txt
 pyinstaller --onefile --noconsole --name savedvars_watcher --distpath downloads --workpath build --specpath build savedvars_watcher.py
 ```
-`--noconsole` matters: the packaged watcher runs **in the system tray** with no window (a gold "4L" icon whose dot is green/amber/red for connected/waiting/needs-attention; right-click for status, open dashboard, open log, quit). Because there's no console, everything it says goes to `savedvars_watcher.log` next to the `.exe`, notable problems also raise a Windows notification, and it never prompts — with several WoW accounts it follows the most recently used one, and with none yet it keeps looking until the addon's first save. Only one copy can run at a time. To try tray mode from source: `python savedvars_watcher.py --tray` (run it from a scratch copy if you already use the watcher's state files in the project folder).
 
-**Rebuild this any time `savedvars_watcher.py` changes** — the server hosts whatever file is in `downloads/` and can't rebuild it itself (PyInstaller only produces binaries for the OS it runs on, and a Coolify container is Linux). The setup page shows the file's build date and SHA-256 so a stale copy is easy to spot. The `.exe` is **not committed** (`downloads/` is in `.gitignore`: it's 14 MB and every rebuild would stay in git history forever) — on the server it's uploaded into a mounted downloads directory instead (see "Deploy to Coolify"), and because the server reads it per request, replacing that file updates the download with no redeploy. If `downloads/` has no exe the site still works, and the page just greys out that button. (`log_watcher.py` can be packaged the same way, but it's the supplementary chat-log watcher and isn't offered on the setup page.) The addon needs no build step — its zip is generated from `LanDashboard/` on each download.
+`downloads/` is git-ignored (the `.exe` is ~14 MB). `/setup` shows the file's build date and SHA-256, so a stale upload is easy to spot.
 
-Players don't need any of the following, since the setup page walks them through it, but for reference: double-clicking the `.exe` with no arguments triggers auto-discovery of the SavedVariables path (scanning `Program Files (x86)`, `Program Files`, the drive root and a `Games` folder on every drive; for anything else add `"savedvars_path"` to the config file). Settings come from `savedvars_watcher_config.json` next to the `.exe` (`server_url`, `ingestion_token`, optionally `savedvars_path`/`poll_interval`) or, when running the script, from `--server-url`/`--ingestion-token` flags. With a `DOWNLOAD_PASSPHRASE` set (below), the server builds that config file for friends automatically.
-
-### 6. Test and lint
+## Tests and lint
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest        # 75 tests, ~5 seconds, no server or database needed
-```
-The suite runs entirely in-process against a throwaway SQLite file per test, so it's safe to run while the real server is up.
-
-`ruff.toml` holds the project's lint config, so the editor and the command line agree:
-```bash
-pip install ruff
-python -m ruff check .          # add --fix for the mechanical ones
-```
-Two rule families are deliberately switched off with reasons in that file: `B008` (FastAPI's `Depends()` in an argument default is the framework's own idiom) and `DTZ005` (the remaining naive timestamps are operator-facing local wall-clock stamps; everything compared across machines — `event_time`, `last_activity` — is already timezone-aware).
-
-### 7. Simulate a Testing Environment
-(Local only — `mock_generator.py` is git-ignored, so this applies on the machine where you keep it.) Launch the mock deployment tool to verify streaming functionality without needing the game running:
-```bash
-python mock_generator.py
-# or, to also test malformed-input handling:
-python mock_generator.py --chaos
+python -m pytest
+python -m ruff check .
 ```
 
-### 8. Deploy to Coolify for Remote Friends (Optional)
-This repo includes a `Dockerfile` (built and verified locally: dashboard serves, `INGESTION_TOKEN` enforced, and the SQLite DB survives a container restart *and* a full remove-and-recreate against the same volume — the actual shape of a Coolify redeploy). No `nixpacks.toml` is needed: create the resource from the Git repo, set **Build Pack: Dockerfile** (Base Directory `/`, Dockerfile Location `/Dockerfile`), set **Ports Exposes to `5000`** (Coolify defaults to 3000; the server listens on `0.0.0.0:5000`), add your domain as `https://<domain>` so Coolify's proxy issues the certificate, and leave the Health Check off (the slim image has no curl/wget for a default-style check to use). A few things matter for a correct deployment:
+The suite stubs out `load_dotenv`, so results never depend on your own `.env`, and it's safe to run while a server is up. `ruff.toml` explains the two rule families that are switched off.
 
-1. **Mount a persistent volume at `/app/data`** and set `DB_FILE=/app/data/lan_progression.db`. Without this, Coolify's container filesystem is ephemeral — every redeploy silently wipes all progression data, with no error to warn you it happened.
-2. **Set env vars through Coolify's UI, not a committed `.env`:** `ROSTER_USERNAME`, `ROSTER_PASSWORD`, `DB_FILE` (as above), and `INGESTION_TOKEN` (required now that the server is reachable from the internet — give every watcher the same value via `--ingestion-token`). Optionally `STALE_AFTER_MINUTES` (default 60) to tune when parked characters drop off the dashboard.
-3. **Lock the watcher download behind a passphrase you hand out.** Set `DOWNLOAD_PASSPHRASE` (a real passphrase — several random words) and `PUBLIC_URL` (e.g. `https://4l.noftz.net`) in Coolify. Then the bare `.exe` is no longer served: a friend opens `https://<your-domain>/setup`, enters the passphrase you sent them (Discord is fine), and downloads a zip containing the `.exe` plus a ready-made config with the server address and the ingestion token filled in — so they never see or type the token, and the token can't be obtained without the passphrase. Wrong guesses are rate-limited (10 per minute site-wide, then a one-minute lockout). The addon zip stays public since it's useless without the watcher. To rotate: change `DOWNLOAD_PASSPHRASE` to cut off new downloads; change `INGESTION_TOKEN` to cut off existing watchers (friends then re-download from the page). Leave `DOWNLOAD_PASSPHRASE` unset and the site keeps the older flow: public `.exe` plus a browser-side config generator where friends paste the token themselves. The token is only ever emitted through the passphrase gate — with no passphrase configured the bundle endpoint returns 404 for everything. Use an `https://` URL (Coolify issues the certificate); an `http://` one gets redirected and the redirected POSTs fail.
-4. **Put the watcher `.exe` in a mounted downloads directory.** The image contains the addon (`LanDashboard/`, zipped on demand) but not the `.exe`. In Coolify's persistent storage for the app, add a second mount — a host directory (or volume) mapped to **`/app/downloads`** — and upload `savedvars_watcher.exe` into that host directory over SFTP/SCP (plain FTP sends your login unencrypted; use it only if that's all the host offers). The name must be exactly `savedvars_watcher.exe`. Rebuilding the watcher later is then just replacing that one file: no redeploy, no git commit. Until it's there, `/setup` shows the watcher button greyed out and everything else works.
+## Deploying (Coolify)
 
-If you test this Dockerfile locally on Windows via Git Bash, note that Git Bash rewrites unix-looking absolute paths (like `/app/data/lan_progression.db`) in command arguments into Windows paths before `docker` ever sees them — prefix the command with `MSYS_NO_PATHCONV=1` or it'll silently pass the wrong value.
+The repo builds with the included `Dockerfile`. In Coolify: **Build Pack: Dockerfile**, **Ports Exposes: `5000`**, domain as `https://<domain>`, health check off (the slim image has no curl).
+
+1. **Persistent volume at `/app/data`** and `DB_FILE=/app/data/lan_progression.db`. Without it, every redeploy silently wipes all progression data.
+2. **Environment variables in Coolify's UI**, never a committed `.env`: at minimum `ROSTER_PASSWORD`, `DB_FILE` and `INGESTION_TOKEN`; usually `DOWNLOAD_PASSPHRASE` and `PUBLIC_URL` too.
+3. **Second mount at `/app/downloads`** holding `savedvars_watcher.exe` (exactly that name), uploaded over SFTP/SCP. Replacing that file updates the download with no redeploy. Until it's there, `/setup` greys out the watcher button.
+
+To rotate: change `DOWNLOAD_PASSPHRASE` to stop new downloads, or `INGESTION_TOKEN` to cut off existing watchers (friends then re-download).
+
+Testing the image locally from Git Bash: prefix `docker` commands with `MSYS_NO_PATHCONV=1`, or Git Bash rewrites `/app/...` paths into Windows paths before Docker sees them.
