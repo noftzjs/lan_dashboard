@@ -32,9 +32,10 @@
         }
         tbody tr:hover { background-color: var(--card-color-hover); }
         tbody tr.row-unsaved { background-color: rgba(243, 167, 60, 0.06); }
-        .access { border: 1px solid var(--border-color); border-radius: 8px; margin-bottom: 16px; }
-        .access > summary { padding: 12px 16px; cursor: pointer; font-weight: 600; font-size: 14px; }
-        .access-body { padding: 0 16px 16px; }
+        /* A tab panel now rather than a collapsible block, so it carries no
+           border of its own -- the page frame already provides one. */
+        .access { margin-bottom: 16px; }
+        .access-body { padding: 4px 0 0; }
         .access-new { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
         .access-new input, .access-new select {
             padding: 7px 10px; font-size: 13px; font-family: inherit;
@@ -91,6 +92,10 @@
     <header>
         <h1>LAN Roster Manager</h1>
         <div class="header-right">
+            <div class="view-switch" role="group" aria-label="Roster view">
+                <button type="button" id="tabRoster" aria-pressed="true">Roster</button>
+                <button type="button" id="tabAccess" aria-pressed="false">Access links</button>
+            </div>
             <span id="playerCount"></span>
             <a class="nav-link" href="/analytics">Analytics</a>
             <a class="nav-link" href="/setup">Setup &amp; Downloads</a>
@@ -99,8 +104,7 @@
         </div>
     </header>
 
-    <details class="access" id="accessPanel">
-        <summary>Analytics access links</summary>
+    <section class="access" id="accessPanel" hidden>
         <div class="access-body">
             <p class="access-empty" style="padding-top:0">Each link lets one person see <b>/analytics</b> &mdash; not this page, and nothing they can edit. Revoke one without affecting the others.</p>
             <div class="access-new">
@@ -120,14 +124,15 @@
             </div>
             <div id="accessList"></div>
         </div>
-    </details>
+    </section>
 
+    <div id="rosterPanel">
     <div class="controls">
         <input class="grow" type="text" id="searchBar" placeholder="Search character name..." oninput="renderRoster()">
     </div>
 
     <div class="table-wrap">
-        <table>
+        <table id="rosterTable">
             <thead id="rosterHead">
                 <tr>
                     <th></th>
@@ -145,6 +150,7 @@
                 <!-- Rendered dynamically by JavaScript -->
             </tbody>
         </table>
+    </div>
     </div>
 </div>
 
@@ -242,9 +248,29 @@
         }
     });
 
-    document.getElementById("accessPanel").addEventListener("toggle", (event) => {
-        if (event.target.open) loadAccessLinks();
-    });
+    // Two tabs rather than one long page. The choice is remembered the same
+    // way the dashboard remembers Ladder vs Big screen, so switching tab is not
+    // undone by a refresh.
+    let rosterTab = "roster";
+    try { rosterTab = localStorage.getItem("rosterTab") || "roster"; } catch (e) { /* private mode */ }
+
+    function showTab(name) {
+        rosterTab = name === "access" ? "access" : "roster";
+        try { localStorage.setItem("rosterTab", rosterTab); } catch (e) { /* ignore */ }
+
+        const onAccess = rosterTab === "access";
+        document.getElementById("accessPanel").hidden = !onAccess;
+        document.getElementById("rosterPanel").hidden = onAccess;
+        document.getElementById("tabRoster").setAttribute("aria-pressed", String(!onAccess));
+        document.getElementById("tabAccess").setAttribute("aria-pressed", String(onAccess));
+        // Loaded on arrival rather than on page load: an operator who never
+        // opens this tab never asks for the list.
+        if (onAccess) loadAccessLinks();
+    }
+
+    document.getElementById("tabRoster").addEventListener("click", () => showTab("roster"));
+    document.getElementById("tabAccess").addEventListener("click", () => showTab("access"));
+    showTab(rosterTab);
 
     const editDrafts = {};   // In-progress edits per player, keyed by name
     const saveStatus = {};   // Transient "Saved" / "Failed" text per player
