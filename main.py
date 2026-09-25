@@ -1,4 +1,6 @@
+import collections
 import contextlib
+import itertools
 import hashlib
 import hmac
 import io
@@ -122,6 +124,48 @@ def public_state(state: dict[str, Any]) -> dict[str, Any]:
     return {**state, "idle_seconds": idle_seconds(state)}
 
 # --- DATABASE LIFECYCLE ---
+
+
+
+
+# --- TRAFFIC LOG --------------------------------------------------------------
+# Every ingest attempt, accepted or refused, kept in memory for an operator to
+# watch. Several of this project's worst bugs were invisible from outside: a
+# watcher that was connected and forwarding nothing, probe output being parsed
+# as events, STATUS payloads refused by a server that had not been redeployed.
+# Each looked like silence. This makes them look like something.
+#
+# In memory and bounded on purpose. It is a live view, not a record -- the
+# durable copy is xp_history for what was accepted and the log file for what
+# was not -- so it costs nothing on restart and cannot grow without limit.
+TRAFFIC_LOG_SIZE = int(os.environ.get("TRAFFIC_LOG_SIZE", "300"))
+_traffic: collections.deque = collections.deque(maxlen=TRAFFIC_LOG_SIZE)
+_traffic_counter = itertools.count(1)
+TRAFFIC_PAYLOAD_PREVIEW = 160
+
+
+def record_traffic(accepted: bool, payload: str, detail: str | None = None) -> dict:
+    """Adds one entry and returns it, so the caller can broadcast the same dict."""
+    player, comma, rest = payload.partition(",")
+    log_type, _, _ = rest.partition(",")
+    # With no name,type prefix there is nothing to trust in the split: without
+    # this, "junk with no commas" was displayed as a character called that.
+    if not comma or not log_type.strip():
+        player, log_type = "", ""
+    entry = {
+        "id": next(_traffic_counter),
+        "at": datetime.now(timezone.utc).isoformat(),
+        "accepted": accepted,
+        "player": player.strip()[:PLAYER_NAME_MAX_LENGTH] or None,
+        "log_type": log_type.strip()[:20] or None,
+        # Truncated: a STATUS line with professions is long, and the operator
+        # is scanning for shape rather than reading every field.
+        "payload": payload[:TRAFFIC_PAYLOAD_PREVIEW],
+        "truncated": len(payload) > TRAFFIC_PAYLOAD_PREVIEW,
+        "detail": detail,
+    }
+    _traffic.append(entry)
+    return entry
 
 
 # --- SESSIONS AND ROLES -------------------------------------------------------
@@ -933,9 +977,14 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
             "state": public_state(player_states[player_name]),
         })
 
+        await broadcast_traffic(record_traffic(True, payload.data))
         return {"status": "success"}
     except Exception as e:
         logger.exception("Failed to process log-update payload: %r", payload.data)
+        # Refusals matter more than acceptances here. A rejected event is gone
+        # for good -- the watcher's sent_count has already moved past it -- so
+        # this is the only place it is ever visible as it happens.
+        await broadcast_traffic(record_traffic(False, payload.data, str(e)))
         return {"status": "error", "detail": str(e)}
 
 # --- OPERATOR-CURATED ROSTER METADATA ---
@@ -1634,6 +1683,53 @@ async def whoami(request: Request,
     if role is None and basic_credentials_ok(credentials):
         role = ROLE_OPERATOR
     return {"role": role}
+
+
+
+
+# Operators watch on their own socket rather than the dashboard's. The
+# dashboard's fan-out is public, and payload text is not: a refused payload can
+# carry a character's gold when they meant to keep it private.
+operator_manager = ConnectionManager()
+
+
+async def broadcast_traffic(entry: dict):
+    await operator_manager.broadcast({"type": "traffic", "entry": entry})
+
+
+@app.get("/api/traffic")
+async def get_traffic(_user: str = Depends(require_operator)):
+    """The recent history, so a page that just opened is not blank until the
+    next event -- which, on a quiet LAN, could be minutes."""
+    entries = list(_traffic)
+    accepted = sum(1 for e in entries if e["accepted"])
+    return {
+        "entries": entries,
+        "kept": len(entries),
+        "capacity": TRAFFIC_LOG_SIZE,
+        "accepted": accepted,
+        "refused": len(entries) - accepted,
+        "connected_dashboards": len(manager.active_connections),
+    }
+
+
+@app.websocket("/ws/traffic")
+async def traffic_socket(websocket: WebSocket):
+    """Live tail. Authenticated from the session cookie, because a WebSocket
+    handshake carries no Authorization header a browser will add for us."""
+    role = read_session(websocket.cookies.get(SESSION_COOKIE))
+    if role != ROLE_OPERATOR:
+        # Refused before accepting, so an unauthorised client never opens.
+        await websocket.close(code=1008)
+        return
+    await operator_manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        operator_manager.disconnect(websocket)
+    except Exception:
+        operator_manager.disconnect(websocket)
 
 
 @app.get("/api/leaderboard")
