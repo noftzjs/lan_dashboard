@@ -1622,9 +1622,18 @@ async def log_in(request: Request, payload: LoginPayload):
 
 
 @app.get("/api/whoami")
-async def whoami(request: Request):
-    """Lets a page show who is signed in, and hide controls it cannot use."""
-    return {"role": read_session(request.cookies.get(SESSION_COOKIE))}
+async def whoami(request: Request,
+                 credentials: HTTPBasicCredentials | None = Depends(optional_basic)):
+    """The role this request actually has, so a page can hide what it cannot use.
+
+    Counts Basic as well as the cookie: an operator using curl or a saved
+    browser credential really is an operator, and reporting "nobody" would hide
+    controls that would then work perfectly well if clicked.
+    """
+    role = read_session(request.cookies.get(SESSION_COOKIE))
+    if role is None and basic_credentials_ok(credentials):
+        role = ROLE_OPERATOR
+    return {"role": role}
 
 
 @app.get("/api/leaderboard")

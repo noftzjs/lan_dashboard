@@ -296,6 +296,30 @@ function formatPlayed(seconds) {
     return `${Math.floor(hours / 24)}d ${hours % 24}h`;
 }
 
+
+// Hides nav entries the current visitor cannot open, so a spectator is not
+// offered two pages that will only bounce them to a login form.
+//
+// Presentation only. The server decides access; this just stops the UI
+// advertising doors that are locked.
+async function trimNavForRole() {
+    const needs = { "/analytics": ["viewer", "operator"], "/roster": ["operator"] };
+    let role = null;
+    try {
+        role = (await (await fetch("/api/whoami")).json()).role;
+    } catch (e) {
+        // Offline or blocked: leave the nav alone rather than hiding things
+        // from someone who may well be entitled to them.
+        return;
+    }
+    document.querySelectorAll(".header-right .nav-link[href]").forEach(link => {
+        const allowed = needs[new URL(link.href, location.origin).pathname];
+        if (allowed && !allowed.includes(role)) link.hidden = true;
+    });
+    const signOut = document.getElementById("signOut");
+    if (signOut && role) signOut.hidden = false;
+}
+
 // Live updates arrive continuously (a websocket message per game event).
 // Rebuilding a list with container.innerHTML = html destroys and recreates
 // every element on every update, which is what caused the focus-loss and

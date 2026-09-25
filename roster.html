@@ -481,19 +481,13 @@
 </script>
 
 <script>
-    (async () => {
-        const button = document.getElementById("signOut");
-        if (!button) return;
-        try {
-            const who = await (await fetch("/api/whoami")).json();
-            if (!who.role) return;                  // Basic, or no session
-            button.hidden = false;
-            button.addEventListener("click", async () => {
-                await fetch("/api/sign-out", { method: "POST" });
-                location.href = "/login";
-            });
-        } catch (e) { /* leave it hidden */ }
-    })();
+    // Shared: hides nav entries this visitor cannot open, and reveals Sign out
+    // when there is a session to end.
+    trimNavForRole();
+    document.getElementById("signOut")?.addEventListener("click", async () => {
+        await fetch("/api/sign-out", { method: "POST" });
+        location.href = "/login";
+    });
 </script>
 </body>
 </html>
