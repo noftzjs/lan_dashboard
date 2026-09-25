@@ -222,9 +222,12 @@ function formatGold(copper) {
 }
 
 // A withheld field and a never-reported one both arrive as null, so the
-// difference lives in private_fields. They must not render alike: an em dash
-// reads as "no data yet", which would make a deliberate choice look like a
-// broken watcher -- and would have someone chasing a bug that isn't there.
+// difference lives in private_fields.
+//
+// On screen they now look the same: a plain dash. Labelling the cell
+// "private" drew attention to exactly the thing the player asked to keep
+// quiet. The difference survives in the hover text, so an operator
+// wondering whether a watcher is broken can still tell.
 function isWithheld(player, field) {
     return Array.isArray(player.private_fields) && player.private_fields.includes(field);
 }
@@ -233,9 +236,7 @@ const WITHHELD_GOLD = "This player chose not to share their gold";
 
 // Returns HTML (like formatGold, which it wraps), so innerHTML only.
 function goldHtml(player) {
-    if (isWithheld(player, "gold")) {
-        return `<span class="withheld">private</span>`;
-    }
+    if (isWithheld(player, "gold")) return "—";
     return formatGold(player.gold);
 }
 
@@ -244,10 +245,12 @@ function goldTitle(player) {
     return isWithheld(player, "gold") ? WITHHELD_GOLD : exactGold(player.gold);
 }
 
-// True when there is something to show at all -- either a value or a
-// deliberate refusal. Used by the layouts that omit gold entirely when absent.
+// True only when there is an actual amount. The compact layouts (card meta
+// line, big screen) omit gold when this is false, so a private value leaves
+// no gap rather than a lone dash between other stats. Tables keep the cell
+// and show the dash.
 function hasGoldToShow(player) {
-    return player.gold != null || isWithheld(player, "gold");
+    return player.gold != null;
 }
 
 function exactGold(copper) {
@@ -261,7 +264,6 @@ function exactGold(copper) {
 // half point is real and rounding it away would flatten characters that are
 // genuinely a tier apart at low level.
 function formatItemLevel(player) {
-    if (isWithheld(player, "item_level")) return "private";
     if (player.item_level === null || player.item_level === undefined) return "\u2014";
     return player.item_level.toFixed(1);
 }
