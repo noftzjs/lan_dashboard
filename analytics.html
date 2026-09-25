@@ -52,6 +52,9 @@
         .legend .sw { width: 11px; height: 11px; border-radius: 2px; }
 
         .chart-scroll { overflow-x: auto; }
+        /* Below this a chart scrolls sideways rather than shrinking: at phone
+           width the SVGs scaled their 11px labels down to 5-6px. */
+        .chart-scroll svg { min-width: 560px; }
         svg { display: block; max-width: 100%; height: auto; }
         .axis-text { fill: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
         .lbl { fill: var(--text-color); font-size: 11.5px; }
@@ -209,7 +212,7 @@
 
     <div class="panel">
         <h2>When everyone played</h2>
-        <p class="answers">One square per character per hour, brighter where more happened. The dark stretches are hours with nothing recorded &mdash; sleep, mostly.</p>
+        <p class="answers">One square per character per hour &mdash; or per few hours, once the data covers more than a few days &mdash; brighter where more happened. The dark stretches are hours with nothing recorded &mdash; sleep, mostly.</p>
         <div id="activity"></div>
     </div>
 
@@ -227,8 +230,50 @@
 </div>
 
 <script src="/static/dashboard.js"></script>
+<!-- d3 scales and ticks only, vendored (see static/vendor/d3/README.md).
+     Order matters: each module reads the ones before it off the d3 global. -->
+<script src="/static/vendor/d3/d3-array.min.js"></script>
+<script src="/static/vendor/d3/d3-color.min.js"></script>
+<script src="/static/vendor/d3/d3-interpolate.min.js"></script>
+<script src="/static/vendor/d3/d3-format.min.js"></script>
+<script src="/static/vendor/d3/d3-time.min.js"></script>
+<script src="/static/vendor/d3/d3-time-format.min.js"></script>
+<script src="/static/vendor/d3/d3-scale.min.js"></script>
 <script>
     const fmt = (n) => (n ?? 0).toLocaleString();
+
+    // One label style for every time axis. A midnight tick names the day;
+    // anything else names the hour. d3 picks where the ticks go, so the
+    // labels stay a readable distance apart whether the data covers an
+    // afternoon or three weeks.
+    const dayLabel = d3.timeFormat("%b %-d");
+    const hourLabel = d3.timeFormat("%-I %p");
+    const timeLabel = d => d3.timeDay(d) < d ? hourLabel(d) : dayLabel(d);
+
+    // How many ticks fit along a length, leaving room for a label each.
+    const tickCount = (length, perLabel) => Math.max(2, Math.floor(length / perLabel));
+
+    // d3 adds a tick at each month start, which can land a day after a
+    // regular one ("Oct 31", "Nov 1") and collide. Keep only ticks at least
+    // minGap from the last one kept, and whose centred label stays inside
+    // [lo, hi].
+    function spacedTicks(ticks, x, minGap, lo, hi) {
+        const kept = [];
+        for (const t of ticks) {
+            const at = x(t);
+            if (at - minGap / 2 < lo || at + minGap / 2 > hi) continue;
+            if (kept.length && at - x(kept[kept.length - 1]) < minGap) continue;
+            kept.push(t);
+        }
+        return kept;
+    }
+
+    // A duration short enough for an axis: "22h", "45m", "3d".
+    function shortDuration(seconds) {
+        if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+        if (seconds < 86400 * 2) return `${+(seconds / 3600).toFixed(seconds < 36000 ? 1 : 0)}h`;
+        return `${Math.round(seconds / 86400)}d`;
+    }
 
     function classChip(cls) {
         const colour = CLASS_COLORS[cls] || "var(--text-muted)";
@@ -364,22 +409,41 @@
             return v.length % 2 ? v[m] : Math.round((v[m - 1] + v[m]) / 2);
         };
         const medians = levels.map(l => median(byLevel.get(l).map(r => r.seconds)));
-        const maxSec = Math.max(...byLevel.get(levels[levels.length - 1]).map(r => r.seconds),
-                                ...medians, 1);
 
-        const W = 640, H = 250, L = 46, R = W - 12, T = 14, B = H - 40;
+        // The scale stops at the 95th percentile of runs rather than the
+        // longest one. A single character left logged in overnight at one
+        // level costs ~22 hours of /played, and scaling to that flattened
+        // every other bar into the floor. Runs past the cap are drawn at the
+        // top edge as an arrow with their real value beside them -- still
+        // visible and still true, just not allowed to set the scale.
+        //
+        // An outlier is anything past three interquartile ranges above the
+        // upper quartile -- far enough out that a slow-but-real level stays
+        // on the scale and only the "went to bed logged in" runs go over.
+        const allRuns = [...byLevel.values()].flat().map(r => r.seconds).sort((a, b) => a - b);
+        const q1 = d3.quantileSorted(allRuns, 0.25), q3 = d3.quantileSorted(allRuns, 0.75);
+        const fence = q3 + 3 * (q3 - q1);
+        const cap = Math.max(d3.max(allRuns.filter(s => s <= fence)) || 0, d3.max(medians), 60);
+
+        // Scaled in minutes or hours rather than seconds, so the "nice" tick
+        // steps are nice in the unit people read: 30m, 1h, 1.5h -- not the
+        // 33m, 1.1h, 1.7h that round numbers of seconds come out as.
+        const unit = cap < 5400 ? 60 : 3600;
+        const suffix = unit === 60 ? "m" : "h";
+        const W = 640, H = 250, L = 46, R = W - 12, T = 22, B = H - 40;
+        const yu = d3.scaleLinear().domain([0, cap / unit]).nice(5).range([B, T]);
+        const y = sec => yu(sec / unit);
+        const top = yu.domain()[1] * unit;
         const slot = (R - L) / levels.length;
-        const barW = Math.max(6, Math.min(22, slot * 0.5));
-        const y = sec => B - (sec / maxSec) * (B - T);
+        const barW = Math.max(4, Math.min(22, slot * 0.5));
 
-        // Ticks every 30 minutes while that stays readable, hourly beyond.
-        const stepSec = maxSec > 4 * 3600 ? 3600 : 1800;
-        const yTicks = [];
-        for (let v = 0; v <= maxSec; v += stepSec) yTicks.push(v);
+        const grid = yu.ticks(5).map(v => `
+            <line class="grid-line" x1="${L}" y1="${yu(v).toFixed(1)}" x2="${R}" y2="${yu(v).toFixed(1)}"/>
+            <text class="axis-text" x="${L - 8}" y="${(yu(v) + 4).toFixed(1)}" text-anchor="end">${v === 0 ? "0" : v + suffix}</text>`).join("");
 
-        const grid = yTicks.map(v => `
-            <line class="grid-line" x1="${L}" y1="${y(v).toFixed(1)}" x2="${R}" y2="${y(v).toFixed(1)}"/>
-            <text class="axis-text" x="${L - 8}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end">${v === 0 ? "0" : formatPlayed(v)}</text>`).join("");
+        // Level labels thin out to every 2nd, 5th or 10th once there is not
+        // room for each -- about 22 units per label at this font size.
+        const every = [1, 2, 5, 10].find(n => slot * n >= 22) || 10;
 
         const marks = levels.map((level, i) => {
             const cx = L + slot * i + slot / 2;
@@ -388,13 +452,21 @@
             const bar = `<rect class="grind-bar" x="${(cx - barW / 2).toFixed(1)}" y="${y(med).toFixed(1)}"
                           width="${barW.toFixed(1)}" height="${Math.max(1, B - y(med)).toFixed(1)}" rx="3">
                           <title>Level ${level}: median ${formatPlayed(med)} across ${runs.length} character${runs.length === 1 ? "" : "s"}</title></rect>`;
-            const dots = runs.map(r => `<circle class="grind-dot${r.name === leader ? " leader" : ""}"
-                          cx="${cx.toFixed(1)}" cy="${y(r.seconds).toFixed(1)}" r="2.6">
-                          <title>${escapeHtml(r.name)} spent ${formatPlayed(r.seconds)} at level ${level}</title></circle>`).join("");
-            const label = (levels.length <= 12 || level % 2 === 0 || i === levels.length - 1)
+            const dots = runs.map(r => {
+                const title = `<title>${escapeHtml(r.name)} spent ${formatPlayed(r.seconds)} at level ${level}</title>`;
+                const cls = `grind-dot${r.name === leader ? " leader" : ""}`;
+                if (r.seconds <= top) {
+                    return `<circle class="${cls}" cx="${cx.toFixed(1)}" cy="${y(r.seconds).toFixed(1)}" r="2.6">${title}</circle>`;
+                }
+                const ty = T - 2;
+                return `<path class="${cls}" d="M${(cx - 4).toFixed(1)},${ty + 6} L${cx.toFixed(1)},${ty - 1} L${(cx + 4).toFixed(1)},${ty + 6} Z">${title}</path>
+                        <text class="axis-text" x="${(cx + 7).toFixed(1)}" y="${ty + 6}">${shortDuration(r.seconds)}</text>`;
+            }).join("");
+            const label = (i % every === 0 || i === levels.length - 1) && !(i !== levels.length - 1 && levels.length - 1 - i < every)
                 ? `<text class="axis-text" x="${cx.toFixed(1)}" y="${B + 16}" text-anchor="middle">${level}</text>` : "";
             return bar + dots + label;
         }).join("");
+        const clipped = allRuns.filter(s => s > top).length;
 
         host.innerHTML = `
             <div class="chart-scroll">
@@ -407,6 +479,7 @@
                 <span class="key"><span class="sw" style="background-color:var(--s1)"></span>Median for that level</span>
                 <span class="key"><span class="sw" style="background-color:var(--neutral-color);border-radius:50%"></span>One character's run</span>
                 ${leader ? `<span class="key"><span class="sw" style="background-color:var(--accent-color);border-radius:50%"></span>${escapeHtml(leader)} (leading)</span>` : ""}
+                ${clipped ? `<span class="key">&#9650; ${clipped === 1 ? "one run is" : `${clipped} runs are`} off the top of the scale, labelled with the real time</span>` : ""}
             </p>
             <details><summary>Table view</summary>
               <div class="table-scroll"><table class="data">
@@ -451,7 +524,8 @@
 
         const W = 640, H = 260;
         const L = 44, R = W - 96, T = 16, B = H - 42;
-        const x = t => L + ((t - minT) / spanT) * (R - L);
+        const xScale = d3.scaleTime().domain([minT, maxT]).range([L, R]);
+        const x = t => xScale(t);
         const y = lv => B - ((lv - minL) / spanL) * (B - T);
 
         // The leader is whoever is highest at the end, ties broken by getting
@@ -472,31 +546,16 @@
         }
         if (yTicks[yTicks.length - 1] !== maxL) yTicks.push(maxL);
 
-        // Time ticks on whole hours, at a spacing that yields a handful of
-        // labels whatever the LAN's length.
-        const hoursSpan = spanT / 3600000;
-        const hourStep = hoursSpan > 36 ? 12 : hoursSpan > 12 ? 6 : hoursSpan > 4 ? 2 : 1;
-        const xTicks = [];
-        const first = new Date(minT); first.setMinutes(0, 0, 0);
-        for (let h = 0; ; h += hourStep) {
-            const at = first.getTime() + h * 3600000;
-            if (at > maxT) break;
-            if (at >= minT) xTicks.push(at);
-        }
+        // Time ticks from d3, which picks round intervals (hours, days,
+        // weeks) for however long the data actually spans. The old loop
+        // assumed a two-day LAN; one early beta tester three weeks out gave
+        // it 53 labels on top of each other.
+        const xTicks = spacedTicks(xScale.ticks(tickCount(R - L, 80)), x, 50, L - 30, W);
 
         const grid = [
             ...yTicks.map(lv => `<line class="grid-line" x1="${L}" y1="${y(lv).toFixed(1)}" x2="${R}" y2="${y(lv).toFixed(1)}"/>
                  <text class="axis-text" x="${L - 8}" y="${(y(lv) + 4).toFixed(1)}" text-anchor="end">${lv}</text>`),
-            // Over a multi-day LAN the same hour comes round again, so the
-            // weekday rides along once the span passes a day.
-            ...xTicks.map(t => {
-                const d = new Date(t);
-                const hour = d.toLocaleTimeString([], { hour: "numeric" });
-                const label = hoursSpan > 24
-                    ? `${d.toLocaleDateString([], { weekday: "short" })} ${hour}`
-                    : hour;
-                return `<text class="axis-text" x="${x(t).toFixed(1)}" y="${B + 18}" text-anchor="middle">${label}</text>`;
-            }),
+            ...xTicks.map(t => `<text class="axis-text" x="${x(t).toFixed(1)}" y="${B + 18}" text-anchor="middle">${timeLabel(t)}</text>`),
         ].join("");
 
         const paths = series.map((s, i) => {
@@ -513,9 +572,20 @@
         // collide; everyone else is reachable by hover and by the name row.
         const leaderSeries = series.find(s => s.name === leader);
         const leaderLast = leaderSeries.points[leaderSeries.points.length - 1];
-        const leaderLabel = `<text class="race-name leader" x="${(x(leaderLast.t) + 9).toFixed(1)}" y="${(y(leaderLast.level) + 4).toFixed(1)}">${escapeHtml(leader)}</text>`;
+        // Beside the end point when the name fits in the margin, otherwise
+        // right-aligned above it -- or below, when the leader is already at
+        // the top of the chart -- so a long name never runs off an edge.
+        // ~6.2 units per character is this font at 11px.
+        const lx = x(leaderLast.t), ly = y(leaderLast.level);
+        const fits = lx + 9 + leader.length * 6.2 <= W - 4;
+        const ny = ly - 9 >= 12 ? ly - 9 : ly + 17;
+        const leaderLabel = fits
+            ? `<text class="race-name leader" x="${(lx + 9).toFixed(1)}" y="${(ly + 4).toFixed(1)}">${escapeHtml(leader)}</text>`
+            : `<text class="race-name leader" x="${Math.min(lx, W - 4).toFixed(1)}" y="${ny.toFixed(1)}" text-anchor="end">${escapeHtml(leader)}</text>`;
 
-        const days = Math.round(spanT / 3600000);
+        // Wall-clock span, not play time -- it includes every night off.
+        const spanHours = spanT / 3600000;
+        const spanText = spanHours < 48 ? `${Math.round(spanHours)} hours` : `${Math.round(spanHours / 24)} days`;
         host.innerHTML = `
             <div class="race-wrap" style="position:relative">
               <div class="chart-scroll">
@@ -523,7 +593,7 @@
                     <line class="grid-line" x1="${L}" y1="${B}" x2="${R}" y2="${B}"/>
                     ${grid}${paths}${leaderLabel}
                     <text class="axis-text" x="${L}" y="${H - 6}">${new Date(minT).toLocaleDateString([], { month: "short", day: "numeric" })}</text>
-                    <text class="axis-text" x="${R}" y="${H - 6}" text-anchor="end">${days}h of play</text>
+                    <text class="axis-text" x="${R}" y="${H - 6}" text-anchor="end">${spanText} first event to last</text>
                 </svg>
               </div>
               <div class="race-names">${ranked.map(s => {
@@ -609,49 +679,73 @@
             return;
         }
 
-        // A continuous axis from first hour to last, so quiet hours occupy
-        // space instead of being closed up.
+        // A continuous axis from first slice to last, so quiet stretches
+        // occupy space instead of being closed up.
+        //
+        // A slice is an hour while that fits, wider once it doesn't: at an
+        // hour per square, three weeks of data is 500 squares and the SVG
+        // shrinks until nothing is legible. The smallest slice that keeps it
+        // to about 72 columns wins. Slices line up with the local clock
+        // (6h slices start at midnight, 6am, noon, 6pm) so they read as
+        // parts of a day rather than arbitrary runs of hours.
+        const MAX_COLUMNS = 72;
         const toDate = key => new Date(key + ":00:00Z");
         const first = toDate(hours[0]), last = toDate(hours[hours.length - 1]);
-        const axis = [];
-        for (let t = first.getTime(); t <= last.getTime(); t += 3600000) {
-            const d = new Date(t);
-            axis.push({
-                key: d.toISOString().slice(0, 13),
-                date: d,
-            });
+        const spanHours = (last - first) / 3600000 + 1;
+        const sliceHours = [1, 2, 3, 6, 12, 24].find(h => spanHours / h <= MAX_COLUMNS) || 24;
+        const slice = sliceHours === 24 ? d3.timeDay : d3.timeHour.every(sliceHours);
+        const axis = slice.range(slice.floor(first), slice.offset(slice.floor(last), 1));
+        const column = date => d3.bisectRight(axis, date) - 1;
+
+        // Each character's hourly counts summed into the slices.
+        const binned = {};
+        for (const name of names) {
+            const cols = new Array(axis.length).fill(0);
+            for (const [key, n] of Object.entries(activity[name])) cols[column(toDate(key))] += n;
+            binned[name] = cols;
         }
 
-        // Thresholds from the quartiles of the hours that had any activity.
-        // Scaling against the single busiest hour instead would push almost
+        // Thresholds from the quartiles of the slices that had any activity.
+        // Scaling against the single busiest one instead would push almost
         // every square into the faintest step.
-        const counts = Object.values(activity).flatMap(byHour => Object.values(byHour)).sort((a, b) => a - b);
+        const counts = Object.values(binned).flat().filter(n => n > 0).sort((a, b) => a - b);
         const q = f => counts[Math.min(counts.length - 1, Math.floor(counts.length * f))];
         const t1 = q(0.25), t2 = q(0.5), t3 = q(0.75);
         const step = n => n === 0 ? 0 : n <= t1 ? 1 : n <= t2 ? 2 : n <= t3 ? 3 : 4;
 
-        const cell = 13, gap = 0, labelW = 150, rowH = 18;
+        const cell = 13, labelW = 150, rowH = 18;
         const W = labelW + axis.length * cell + 12;
         const H = names.length * rowH + 42;
 
+        const sliceText = start => {
+            const end = slice.offset(start, 1);
+            if (sliceHours === 24) return start.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+            const day = start.toLocaleDateString([], { weekday: "short" });
+            const hr = d => d.toLocaleTimeString([], { hour: "numeric" });
+            return sliceHours === 1 ? `${day} ${hr(start)}` : `${day} ${hr(start)}–${hr(end)}`;
+        };
+
         const rows = names.map((name, r) => {
             const y = r * rowH + 24;
-            const byHour = activity[name] || {};
-            const squares = axis.map((h, i) => {
-                const n = byHour[h.key] || 0;
-                const local = h.date.toLocaleString([], { weekday: "short", hour: "numeric" });
+            const squares = axis.map((start, i) => {
+                const n = binned[name][i];
                 return `<rect class="heat-cell heat-${step(n)}" x="${labelW + i * cell}" y="${y}"
                           width="${cell - 1}" height="${rowH - 4}" rx="2"
-                        ><title>${escapeHtml(name)} — ${local}: ${n} event${n === 1 ? "" : "s"}</title></rect>`;
+                        ><title>${escapeHtml(name)} — ${sliceText(start)}: ${n} event${n === 1 ? "" : "s"}</title></rect>`;
             }).join("");
             return `<text class="heat-name" x="${labelW - 8}" y="${y + 11}" text-anchor="end">${escapeHtml(name)}</text>${squares}`;
         }).join("");
 
-        // A label every six hours keeps the axis readable at any LAN length.
-        const ticks = axis.map((h, i) => {
-            if (h.date.getHours() % 6 !== 0) return "";
-            return `<text class="axis-text" x="${labelW + i * cell + cell / 2}" y="16" text-anchor="middle">${h.date.toLocaleString([], { weekday: "short", hour: "numeric" })}</text>`;
-        }).join("");
+        // Tick positions from a time scale over the same columns, so labels
+        // stay ~80 units apart however many columns there are.
+        const tx = d3.scaleTime()
+            .domain([axis[0], slice.offset(axis[axis.length - 1], 1)])
+            .range([labelW, labelW + axis.length * cell]);
+        const ticks = spacedTicks(tx.ticks(tickCount(axis.length * cell, 80)), tx, 50, labelW - 8, W)
+            .map(t => `<text class="axis-text" x="${tx(t).toFixed(1)}" y="16" text-anchor="middle">${timeLabel(t)}</text>`)
+            .join("");
+        const sliceName = sliceHours === 1 ? "an hour" : sliceHours === 24 ? "a day" : `${sliceHours} hours`;
+        const spanName = spanHours < 48 ? `${Math.round(spanHours)} hours` : `${Math.round(spanHours / 24)} days`;
 
         const totals = names.map(n => ({
             name: n,
@@ -670,7 +764,7 @@
                 <span class="key"><span class="sw" style="background-color:var(--h2)"></span></span>
                 <span class="key"><span class="sw" style="background-color:var(--h3)"></span></span>
                 <span class="key"><span class="sw" style="background-color:var(--h4)"></span>busiest</span>
-                <span class="key">${axis.length} hours from first event to last</span>
+                <span class="key">each square is ${sliceName} &middot; ${spanName} from first event to last</span>
             </p>
             <details><summary>Table view</summary>
               <div class="table-scroll"><table class="data">

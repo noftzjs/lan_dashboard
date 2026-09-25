@@ -43,6 +43,20 @@ PROFESSIONS = [
 ]
 
 LEVEL_CAP = 20
+
+# Two shapes real data will have and a tidy two-day seed never did. The charts'
+# tick logic was written against that tidy seed and fell apart on the first
+# data that was neither.
+#
+# An early beta tester who played a few hours three weeks before the LAN and
+# never came back: the time axis now spans weeks, not two days.
+EARLY_TESTER = ("Early Beta", "DRUID", "Alliance", "", 0.9, -21 * 24)
+EARLY_STOP_HOURS = 7
+#
+# A character left logged in, idle, at one level for most of a day. /played
+# keeps counting while nobody is at the keyboard, so that level genuinely costs
+# ~22 hours of played time and dwarfs every other.
+IDLE_CHARACTER, IDLE_LEVEL, IDLE_HOURS = "Thanatu Mournveil", 12, 22
 posted = rejected = 0
 carry: dict[str, float] = {}   # fractional levels carried between steps
 
@@ -68,7 +82,7 @@ def xp_for(level: int) -> int:
     return int(400 + (level ** 2.1) * 38)
 
 
-for name, cls, faction, guild, pace, first_hour in ROSTER:
+for name, cls, faction, guild, pace, first_hour in ROSTER + [EARLY_TESTER]:
     zones = ZONES_A if faction == "Alliance" else ZONES_H
     t = START + datetime.timedelta(hours=first_hour)
     post(t, f"{name},PROFILE,{stamp(t)},{faction},{cls},{guild}")
@@ -80,7 +94,9 @@ for name, cls, faction, guild, pace, first_hour in ROSTER:
     prof_rank = {p[0]: 0 for p in my_profs}
 
     hour = first_hour
-    while hour < LAN_HOURS and level < LEVEL_CAP:
+    stop = first_hour + EARLY_STOP_HOURS if name == EARLY_TESTER[0] else LAN_HOURS
+    idled = False
+    while hour < stop and level < LEVEL_CAP:
         step = random.uniform(0.6, 1.4)
         hour += step
         t = START + datetime.timedelta(hours=hour)
@@ -94,6 +110,9 @@ for name, cls, faction, guild, pace, first_hour in ROSTER:
             continue
 
         played += int(step * 3600)
+        if name == IDLE_CHARACTER and level == IDLE_LEVEL and not idled:
+            played += IDLE_HOURS * 3600      # logged in, nobody home
+            idled = True
         if random.random() < 0.22:
             idle = int(random.uniform(300, 2400))
             afk += idle
