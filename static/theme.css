@@ -51,15 +51,36 @@ h1 { margin: 0; font-size: 22px; color: var(--accent-color); }
    the whole page sideways. */
 .header-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
 #playerCount { font-size: 13px; color: var(--text-muted); }
+/* Used on both <a> and <button>. A button carries the browser's own
+   chrome -- its own background, border and font -- so those are reset here
+   rather than left to show through as a white box among the links. */
 .nav-link {
     color: var(--text-muted);
     font-size: 13px;
+    font-family: inherit;
+    line-height: 1.35;
     text-decoration: none;
+    background-color: transparent;
     border: 1px solid var(--border-color);
     padding: 5px 10px;
     border-radius: 6px;
+    cursor: pointer;
 }
 .nav-link:hover { color: var(--text-color); border-color: var(--text-muted); }
+.nav-link:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 1px; }
+
+/* Where you already are. Marked so the nav answers "which page is this?"
+   without having to read the heading. */
+.nav-link[aria-current="page"] {
+    color: var(--text-color);
+    background-color: var(--card-color);
+    border-color: var(--text-dim);
+}
+
+/* An action rather than a destination, so it takes the heading's colour to
+   set it apart from its neighbours without shouting. */
+.nav-link.nav-action { color: var(--accent-color); border-color: rgba(243, 167, 60, 0.4); }
+.nav-link.nav-action:hover { color: var(--accent-color); border-color: var(--accent-color); }
 
 /* Controls */
 .controls { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
