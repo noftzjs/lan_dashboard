@@ -8,7 +8,39 @@
     <link rel="stylesheet" href="/static/theme.css">
     <style>
         /* Page-specific: an editable table instead of the spectator card grid */
-        .table-wrap { overflow-x: auto; border-radius: 10px; border: 1px solid var(--border-color); }
+        /* Browser-style tabs: the selected one shares the panel's background
+           and sits one pixel over its top border, so the two read as a single
+           shape rather than a button floating above a box. */
+        .tabs { display: flex; gap: 3px; padding-left: 4px; }
+        .tabs button {
+            font-family: inherit; font-size: 13px; cursor: pointer;
+            padding: 9px 18px 10px;
+            color: var(--text-muted);
+            background-color: var(--bg-color);
+            border: 1px solid var(--border-color);
+            border-bottom: none;
+            border-radius: 8px 8px 0 0;
+        }
+        .tabs button:hover { color: var(--text-color); }
+        .tabs button[aria-selected="true"] {
+            color: var(--text-color);
+            background-color: var(--card-color);
+            font-weight: 600;
+            position: relative;
+            z-index: 1;
+            margin-bottom: -1px;   /* covers the panel's border, joining them */
+            padding-bottom: 11px;  /* ...without the label shifting up */
+        }
+        .tabs button:focus-visible { outline: 2px solid var(--accent-color); outline-offset: -2px; }
+        .tab-body {
+            background-color: var(--card-color);
+            border: 1px solid var(--border-color);
+            border-radius: 0 10px 10px 10px;
+            padding: 16px;
+        }
+        /* The table already sits inside the panel, so its own frame would be a
+           second border a pixel inside the first. */
+        .table-wrap { overflow-x: auto; }
         table { width: 100%; border-collapse: collapse; min-width: 900px; }
         thead th {
             text-align: left;
@@ -92,10 +124,6 @@
     <header>
         <h1>LAN Roster Manager</h1>
         <div class="header-right">
-            <div class="view-switch" role="group" aria-label="Roster view">
-                <button type="button" id="tabRoster" aria-pressed="true">Roster</button>
-                <button type="button" id="tabAccess" aria-pressed="false">Access links</button>
-            </div>
             <span id="playerCount"></span>
             <a class="nav-link" href="/analytics">Analytics</a>
             <a class="nav-link" href="/setup">Setup &amp; Downloads</a>
@@ -104,7 +132,13 @@
         </div>
     </header>
 
-    <section class="access" id="accessPanel" hidden>
+    <div class="tabs" role="tablist" aria-label="Roster view">
+        <button type="button" id="tabRoster" role="tab" aria-selected="true" aria-controls="rosterPanel">Roster</button>
+        <button type="button" id="tabAccess" role="tab" aria-selected="false" aria-controls="accessPanel">Access links</button>
+    </div>
+    <div class="tab-body">
+
+    <section class="access" id="accessPanel" role="tabpanel" aria-labelledby="tabAccess" hidden>
         <div class="access-body">
             <p class="access-empty" style="padding-top:0">Each link lets one person see <b>/analytics</b> &mdash; not this page, and nothing they can edit. Revoke one without affecting the others.</p>
             <div class="access-new">
@@ -126,7 +160,7 @@
         </div>
     </section>
 
-    <div id="rosterPanel">
+    <div id="rosterPanel" role="tabpanel" aria-labelledby="tabRoster">
     <div class="controls">
         <input class="grow" type="text" id="searchBar" placeholder="Search character name..." oninput="renderRoster()">
     </div>
@@ -151,6 +185,8 @@
             </tbody>
         </table>
     </div>
+    </div>
+
     </div>
 </div>
 
@@ -261,8 +297,8 @@
         const onAccess = rosterTab === "access";
         document.getElementById("accessPanel").hidden = !onAccess;
         document.getElementById("rosterPanel").hidden = onAccess;
-        document.getElementById("tabRoster").setAttribute("aria-pressed", String(!onAccess));
-        document.getElementById("tabAccess").setAttribute("aria-pressed", String(onAccess));
+        document.getElementById("tabRoster").setAttribute("aria-selected", String(!onAccess));
+        document.getElementById("tabAccess").setAttribute("aria-selected", String(onAccess));
         // Loaded on arrival rather than on page load: an operator who never
         // opens this tab never asks for the list.
         if (onAccess) loadAccessLinks();
@@ -270,6 +306,18 @@
 
     document.getElementById("tabRoster").addEventListener("click", () => showTab("roster"));
     document.getElementById("tabAccess").addEventListener("click", () => showTab("access"));
+
+    // Left/right between tabs, which is what a tablist is expected to do once
+    // it claims the role -- without it the markup promises keyboard behaviour
+    // the page does not deliver.
+    document.querySelector(".tabs").addEventListener("keydown", (event) => {
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+        event.preventDefault();
+        const next = rosterTab === "roster" ? "access" : "roster";
+        showTab(next);
+        document.getElementById(next === "access" ? "tabAccess" : "tabRoster").focus();
+    });
+
     showTab(rosterTab);
 
     const editDrafts = {};   // In-progress edits per player, keyed by name
