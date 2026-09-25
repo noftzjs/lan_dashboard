@@ -32,6 +32,43 @@
         }
         tbody tr:hover { background-color: var(--card-color-hover); }
         tbody tr.row-unsaved { background-color: rgba(243, 167, 60, 0.06); }
+        .access { border: 1px solid var(--border-color); border-radius: 8px; margin-bottom: 16px; }
+        .access > summary { padding: 12px 16px; cursor: pointer; font-weight: 600; font-size: 14px; }
+        .access-body { padding: 0 16px 16px; }
+        .access-new { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+        .access-new input, .access-new select {
+            padding: 7px 10px; font-size: 13px; font-family: inherit;
+            background-color: var(--bg-color); color: var(--text-color);
+            border: 1px solid var(--border-color); border-radius: 6px;
+        }
+        /* flex-basis, not min-width: a hard 260px minimum cannot shrink, so
+           at phone width the row pushed the whole page sideways. This asks for
+           260 and gives it back when there isn't room. */
+        .access-new input { flex: 1 1 260px; min-width: 0; }
+        /* The link is shown once and never again, so it gets a box that is
+           hard to miss and a copy button rather than a line of text someone
+           might scroll past. */
+        .access-link {
+            display: none; margin: 12px 0; padding: 12px;
+            border: 1px solid var(--accent-color); border-radius: 8px;
+            background-color: rgba(243, 167, 60, 0.08);
+        }
+        .access-link.shown { display: block; }
+        .access-link code {
+            display: block; margin: 8px 0; padding: 8px 10px; font-size: 12px;
+            background-color: var(--bg-color); border-radius: 6px;
+            word-break: break-all; color: var(--text-color);
+        }
+        .access-warn { color: var(--accent-color); font-size: 12.5px; font-weight: 600; }
+        /* Its own scroll box, the way the roster table above already has one.
+           Five columns do not fit a phone, and without this the table pushed
+           the whole page sideways instead of scrolling inside itself. */
+        #accessList { overflow-x: auto; }
+        .access table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 460px; }
+        .access th { text-align: left; font-weight: 500; color: var(--text-muted); font-size: 12px; padding: 6px 10px 6px 0; }
+        .access td { padding: 7px 10px 7px 0; border-top: 1px solid var(--border-color); }
+        .access tr.revoked td { opacity: 0.45; text-decoration: line-through; }
+        .access-empty { color: var(--text-muted); font-size: 13px; padding: 10px 0; }
         .col-input input { width: 100%; min-width: 160px; padding: 6px 10px; font-size: 13px; }
         .col-tags input { min-width: 200px; }
         .name-cell { font-weight: 600; white-space: nowrap; }
@@ -62,6 +99,29 @@
         </div>
     </header>
 
+    <details class="access" id="accessPanel">
+        <summary>Analytics access links</summary>
+        <div class="access-body">
+            <p class="access-empty" style="padding-top:0">Each link lets one person see <b>/analytics</b> &mdash; not this page, and nothing they can edit. Revoke one without affecting the others.</p>
+            <div class="access-new">
+                <input type="email" id="accessLabel" placeholder="Their email, so you know whose link to revoke" autocomplete="off">
+                <select id="accessRole">
+                    <option value="viewer">Can view analytics</option>
+                    <option value="operator">Full operator access</option>
+                </select>
+                <button class="btn btn-save" data-action="mint-link">Create link</button>
+                <span id="accessError" class="access-warn"></span>
+            </div>
+            <div class="access-link" id="accessResult">
+                <span class="access-warn">Copy this now &mdash; it is not stored and cannot be shown again.</span>
+                <code id="accessResultLink"></code>
+                <button class="btn" data-action="copy-link">Copy link</button>
+                <span id="accessCopied" class="access-empty"></span>
+            </div>
+            <div id="accessList"></div>
+        </div>
+    </details>
+
     <div class="controls">
         <input class="grow" type="text" id="searchBar" placeholder="Search character name..." oninput="renderRoster()">
     </div>
@@ -91,6 +151,101 @@
 <script src="/static/vendor/morphdom-umd.min.js"></script>
 <script src="/static/dashboard.js"></script>
 <script>
+    // --- access links ---------------------------------------------------
+    // Data attributes and delegated listeners, not inline handlers, so nothing
+    // has to be serialised into an attribute and escaped correctly.
+    async function loadAccessLinks() {
+        const host = document.getElementById("accessList");
+        let data;
+        try {
+            const response = await fetch("/api/access-tokens");
+            if (!response.ok) throw new Error(response.status);
+            data = await response.json();
+        } catch (e) {
+            host.innerHTML = `<p class="access-empty">Couldn't load the list (${escapeHtml(String(e.message || e))}).</p>`;
+            return;
+        }
+        if (!data.tokens.length) {
+            host.innerHTML = `<p class="access-empty">No links yet.</p>`;
+            return;
+        }
+        const when = value => value ? new Date(value).toLocaleString() : "\u2014";
+        host.innerHTML = `
+            <table>
+              <thead><tr><th>Who</th><th>Access</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+              <tbody>${data.tokens.map(t => `
+                <tr class="${t.revoked ? "revoked" : ""}">
+                    <td>${escapeHtml(t.label || "")}</td>
+                    <td>${t.role === "operator" ? "Operator" : "Analytics"}</td>
+                    <td>${when(t.created_at)}</td>
+                    <td>${when(t.last_used_at)}</td>
+                    <td>${t.revoked ? "" : `<button class="btn" data-action="revoke-link" data-id="${escapeHtml(t.id)}">Revoke</button>`}</td>
+                </tr>`).join("")}</tbody>
+            </table>`;
+    }
+
+    async function mintAccessLink() {
+        const label = document.getElementById("accessLabel").value.trim();
+        const role = document.getElementById("accessRole").value;
+        const error = document.getElementById("accessError");
+        error.textContent = "";
+        if (!label) {
+            error.textContent = "Add an email first.";
+            return;
+        }
+        const response = await fetch("/api/access-tokens", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ label, role }),
+        });
+        if (!response.ok) {
+            const body = await response.json().catch(() => ({}));
+            error.textContent = body.detail || `Failed (${response.status}).`;
+            return;
+        }
+        const created = await response.json();
+        document.getElementById("accessResultLink").textContent = created.link;
+        document.getElementById("accessResult").classList.add("shown");
+        document.getElementById("accessCopied").textContent = "";
+        document.getElementById("accessLabel").value = "";
+        loadAccessLinks();
+    }
+
+    document.getElementById("accessPanel").addEventListener("click", async (event) => {
+        const button = event.target.closest("[data-action]");
+        if (!button) return;
+        const action = button.dataset.action;
+        if (action === "mint-link") {
+            await mintAccessLink();
+        } else if (action === "copy-link") {
+            const link = document.getElementById("accessResultLink").textContent;
+            try {
+                await navigator.clipboard.writeText(link);
+                document.getElementById("accessCopied").textContent = "Copied.";
+            } catch {
+                // Clipboard access needs a secure context, so it fails over
+                // plain http. Selecting the text is the fallback that always
+                // works rather than leaving the button apparently dead.
+                const range = document.createRange();
+                range.selectNodeContents(document.getElementById("accessResultLink"));
+                const selection = window.getSelection();
+                selection.removeAllRanges();
+                selection.addRange(range);
+                document.getElementById("accessCopied").textContent = "Selected \u2014 press Ctrl+C.";
+            }
+        } else if (action === "revoke-link") {
+            // Reissuing is easy but this link is gone for good, so confirm.
+            if (!window.confirm("Revoke this link? Whoever has it loses access at their next visit.")) return;
+            button.disabled = true;
+            await fetch(`/api/access-tokens/${encodeURIComponent(button.dataset.id)}/revoke`, { method: "POST" });
+            loadAccessLinks();
+        }
+    });
+
+    document.getElementById("accessPanel").addEventListener("toggle", (event) => {
+        if (event.target.open) loadAccessLinks();
+    });
+
     const editDrafts = {};   // In-progress edits per player, keyed by name
     const saveStatus = {};   // Transient "Saved" / "Failed" text per player
 
