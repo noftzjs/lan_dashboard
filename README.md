@@ -158,6 +158,27 @@ Measured with `/ldb probe` (addon v3.2.0) on `1.60.1 build 69977, toc 16001`. Re
 
   **Display:** the ladder is already at ten columns and tight, so this probably belongs in the Big screen meta line and the analytics roster rather than as an eleventh column &mdash; and note the Big screen meta is *already* truncating, so that item wants fixing first.
 
+### Logged 2026-09-24 &mdash; access control
+These two are the same question split in two: who is allowed to see what. Worth designing together even if they ship apart, because the answer to the second one decides how the first is built.
+
+- [ ] **Let specific people see `/analytics` without building an auth system.** People have asked to see it, and the current answer is one shared password that also unlocks `/roster` &mdash; so handing it out gives away the ability to edit things.
+
+  **Shape that stays small:** generate a long random token per person, keep it in a table with the email they gave and when it was last used, and send them `https://4l.noftz.net/analytics?k=<token>` yourself over Discord. No mail server, no signup, no password reset &mdash; if someone loses it, revoke and regenerate. The email is a label so you know whose token to revoke, not a login.
+
+  **The one detail worth getting right:** take the token out of the URL on arrival. Set a signed cookie, then redirect to the clean `/analytics`, so the link does not live on in browser history, screenshots or a shared tab. A token that survives in a screenshot is the same problem as the shared password, just slower.
+
+  Each token being separate is the whole point: you can see who is actually using it, and revoke one person without changing anything for anyone else.
+
+- [ ] **A real admin area, separate from viewing.** `/roster` is protected by the same credential as `/analytics` today, which means the two roles cannot be told apart. The admin area is where the operator-only things belong &mdash; roster editing, the hide/lockout toggle already logged above, report generation, and a networking tab showing live incoming traffic.
+
+  **Two roles is enough:** operator and viewer. Everything currently behind `ROSTER_PASSWORD` splits along that line.
+
+  **Drop HTTP Basic when this happens.** It has no logout: the browser keeps resending the credential and will not re-prompt, which is not a quirk but a real problem for an admin area &mdash; and it already caused confusion locally, where a cached credential looked like a broken password. A session cookie can be revoked and can expire; Basic cannot do either.
+
+  **Reuse what exists rather than inventing it:** `safe_equals` for constant-time comparison (it already handles the non-ASCII case that used to 500), and the download passphrase's lockout (10 failures in 60 seconds, then 429) as the pattern for login attempts. This is an internet-facing app now, so the admin area is where risk concentrates &mdash; worth resisting anything hand-rolled beyond a random token and a signed cookie.
+
+  **The networking tab is cheaper than it sounds.** Ingested events already fan out over a WebSocket to the dashboard; an operator-only stream of accepted and rejected payloads would reuse that path. It would also have made several of this week's problems visible immediately rather than after digging through a watcher log &mdash; the silent queue stall, the probe payloads being parsed as events, and the STATUS rejections all looked like nothing at all from the outside.
+
 ### Logged 2026-09-24 &mdash; end-of-LAN report
 - [ ] **A report to close the event with: who died most, who quested most, who got there first.** The dashboard answers "what is happening"; this answers "what happened", once, at the end. It is the thing people screenshot into Discord on the Sunday night, so it is worth more than its build cost.
 
