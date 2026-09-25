@@ -108,7 +108,31 @@
         .traffic-live { margin-left: auto; font-size: 12px; }
         .traffic-live.on::before { content: "\25CF  "; color: #3fb950; }
         .traffic-live.off::before { content: "\25CF  "; color: var(--text-dim); }
-        .traffic-filter { font-size: 13px; color: var(--text-muted); display: flex; align-items: center; gap: 6px; cursor: pointer; }
+        .traffic-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+        .traffic-tools input, .traffic-tools select {
+            padding: 6px 10px; font-size: 13px; font-family: inherit;
+            background-color: var(--bg-color); color: var(--text-color);
+            border: 1px solid var(--border-color); border-radius: 6px;
+        }
+        /* flex-basis rather than a fixed width, so it gives space back at phone width. */
+        .traffic-tools input { flex: 1 1 220px; min-width: 0; }
+        .traffic-tools label { font-size: 12.5px; color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
+        /* Headers are buttons so sorting works from the keyboard, styled to
+           read as headers rather than as a row of buttons. */
+        #trafficList th button { all: unset; cursor: pointer; }
+        #trafficList th button:hover { color: var(--text-color); }
+        #trafficList th button:focus-visible { outline: 2px solid var(--accent-color); outline-offset: 2px; }
+        .traffic-pager { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between;
+                         margin-top: 12px; font-size: 12.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+        .traffic-pager .pages { display: flex; gap: 6px; align-items: center; }
+        .traffic-pager button, .traffic-new {
+            padding: 5px 12px; font-size: 12.5px; font-family: inherit; cursor: pointer;
+            background-color: transparent; color: var(--text-color);
+            border: 1px solid var(--border-color); border-radius: 6px;
+        }
+        .traffic-pager button:disabled { opacity: 0.4; cursor: default; }
+        .traffic-pager button:not(:disabled):hover { border-color: var(--accent-color); }
+        .traffic-new { border-color: var(--accent-color); color: var(--accent-color); margin-bottom: 10px; }
         #trafficList { overflow-x: auto; }
         #trafficList table { width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 620px; }
         #trafficList th { text-align: left; font-weight: 500; color: var(--text-muted); font-size: 12px; padding: 6px 10px 6px 0; }
@@ -171,11 +195,39 @@
             <span><b id="tAccepted">0</b> accepted</span>
             <span class="refused"><b id="tRefused">0</b> refused</span>
             <span><b id="tDashboards">0</b> <span id="tDashboardsWord">dashboards</span> open</span>
-            <label class="traffic-filter"><input type="checkbox" id="refusedOnly"> Refused only</label>
             <span class="traffic-live off" id="trafficLive">Connecting&hellip;</span>
         </div>
         <p class="access-empty" style="padding-top:0">Every event a watcher sends, newest first. A refused event is gone for good &mdash; the watcher has already moved past it &mdash; so this is the only place it shows up as it happens.</p>
+        <div class="traffic-tools">
+            <input type="search" id="trafficSearch" placeholder="Search character, type, payload or reason" autocomplete="off" aria-label="Search traffic">
+            <label>Result
+                <select id="trafficResult">
+                    <option value="all">All</option>
+                    <option value="accepted">Accepted</option>
+                    <option value="refused">Refused</option>
+                </select>
+            </label>
+            <label>Type
+                <select id="trafficType"><option value="">All</option></select>
+            </label>
+            <label>Per page
+                <select id="trafficPageSize">
+                    <option>25</option>
+                    <option>50</option>
+                    <option>100</option>
+                </select>
+            </label>
+        </div>
+        <button type="button" class="traffic-new" id="trafficNew" hidden></button>
         <div id="trafficList"></div>
+        <div class="traffic-pager" id="trafficPager" hidden>
+            <span id="trafficRange"></span>
+            <span class="pages">
+                <button type="button" id="trafficPrev">&lsaquo; Prev</button>
+                <span id="trafficPageOf"></span>
+                <button type="button" id="trafficNext">Next &rsaquo;</button>
+            </span>
+        </div>
     </section>
 
     <section class="access" id="accessPanel" role="tabpanel" aria-labelledby="tabAccess" hidden>
@@ -376,25 +428,94 @@
     let trafficCapacity = 300;
     const freshIds = new Set();
 
+    // Search, filter, sort and page all happen here in the browser. The
+    // server only ever keeps the last few hundred events and sends all of
+    // them, so there is nothing to gain from asking it again.
+    const trafficView = { sort: "time", dir: -1, page: 0, pending: 0 };
+    const TRAFFIC_COLUMNS = [
+        { key: "time",   label: "Time",      value: e => e.id },
+        { key: "result", label: "Result",    value: e => e.accepted ? 1 : 0 },
+        { key: "player", label: "Character", value: e => (e.player || "").toLowerCase() },
+        { key: "type",   label: "Type",      value: e => (e.log_type || "").toLowerCase() },
+    ];
+
+    function trafficMatches(e) {
+        const result = document.getElementById("trafficResult").value;
+        if (result === "accepted" && !e.accepted) return false;
+        if (result === "refused" && e.accepted) return false;
+        const type = document.getElementById("trafficType").value;
+        if (type && e.log_type !== type) return false;
+        const q = document.getElementById("trafficSearch").value.trim().toLowerCase();
+        if (!q) return true;
+        return [e.player, e.log_type, e.payload, e.detail].some(v => v && v.toLowerCase().includes(q));
+    }
+
+    // The type list is built from what has actually arrived, so it never
+    // offers a filter that can only come back empty.
+    function refreshTypeOptions() {
+        const select = document.getElementById("trafficType");
+        const types = [...new Set(trafficEntries.map(e => e.log_type).filter(Boolean))].sort();
+        const have = [...select.options].slice(1).map(o => o.value);
+        if (types.join() === have.join()) return;
+        const current = select.value;
+        select.innerHTML = `<option value="">All</option>` +
+            types.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join("");
+        select.value = types.includes(current) ? current : "";
+    }
+
     function renderTraffic() {
-        const refusedOnly = document.getElementById("refusedOnly").checked;
         const accepted = trafficEntries.filter(e => e.accepted).length;
         document.getElementById("tAccepted").textContent = accepted;
         document.getElementById("tRefused").textContent = trafficEntries.length - accepted;
+        refreshTypeOptions();
 
-        const shown = trafficEntries.filter(e => !refusedOnly || !e.accepted).slice().reverse();
+        const column = TRAFFIC_COLUMNS.find(c => c.key === trafficView.sort);
+        // Ties fall back to newest first, so equal names keep a stable order.
+        const shown = trafficEntries.filter(trafficMatches).sort((a, b) => {
+            const va = column.value(a), vb = column.value(b);
+            return (va < vb ? -1 : va > vb ? 1 : 0) * trafficView.dir || b.id - a.id;
+        });
+
+        const pageSize = Number(document.getElementById("trafficPageSize").value);
+        const pages = Math.max(1, Math.ceil(shown.length / pageSize));
+        trafficView.page = Math.min(trafficView.page, pages - 1);
+        const start = trafficView.page * pageSize;
+        const pageRows = shown.slice(start, start + pageSize);
+
+        const newButton = document.getElementById("trafficNew");
+        newButton.hidden = !trafficView.pending;
+        newButton.textContent = `${trafficView.pending} new event${trafficView.pending === 1 ? "" : "s"} — show newest`;
+
+        const pager = document.getElementById("trafficPager");
+        pager.hidden = shown.length <= pageSize;
+        document.getElementById("trafficRange").textContent =
+            `${start + 1}–${start + pageRows.length} of ${shown.length}` +
+            (shown.length < trafficEntries.length ? ` (filtered from ${trafficEntries.length})` : "");
+        document.getElementById("trafficPageOf").textContent = `Page ${trafficView.page + 1} of ${pages}`;
+        document.getElementById("trafficPrev").disabled = trafficView.page === 0;
+        document.getElementById("trafficNext").disabled = trafficView.page >= pages - 1;
+
         const host = document.getElementById("trafficList");
         if (!shown.length) {
-            host.innerHTML = `<p class="access-empty">${refusedOnly
-                ? "Nothing refused. Good."
-                : "Nothing yet. Events appear here as watchers send them."}</p>`;
+            const filtered = trafficEntries.length > 0;
+            const refusedOnly = document.getElementById("trafficResult").value === "refused";
+            host.innerHTML = `<p class="access-empty">${
+                refusedOnly && filtered && !document.getElementById("trafficSearch").value.trim() && !document.getElementById("trafficType").value
+                    ? "Nothing refused. Good."
+                    : filtered ? "Nothing matches these filters."
+                    : "Nothing yet. Events appear here as watchers send them."}</p>`;
             return;
         }
         const time = iso => new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+        const header = c => {
+            const on = c.key === trafficView.sort;
+            const aria = on ? ` aria-sort="${trafficView.dir === 1 ? "ascending" : "descending"}"` : "";
+            return `<th${aria}><button type="button" data-sort="${c.key}">${c.label} <span class="sort-indicator">${on ? (trafficView.dir === 1 ? "▲" : "▼") : ""}</span></button></th>`;
+        };
         host.innerHTML = `
             <table>
-              <thead><tr><th>Time</th><th>Result</th><th>Character</th><th>Type</th><th>Payload</th></tr></thead>
-              <tbody>${shown.map(e => `
+              <thead><tr>${TRAFFIC_COLUMNS.map(header).join("")}<th>Payload</th></tr></thead>
+              <tbody>${pageRows.map(e => `
                 <tr class="${e.accepted ? "" : "refused"} ${freshIds.has(e.id) ? "fresh" : ""}">
                     <td class="when">${time(e.at)}</td>
                     <td><span class="verdict ${e.accepted ? "ok" : "no"}">${e.accepted ? "Accepted" : "Refused"}</span></td>
@@ -423,9 +544,15 @@
         // Only mark as fresh what arrived since the last look, so a poll does
         // not flash the whole list.
         const known = new Set(trafficEntries.map(e => e.id));
-        for (const e of data.entries) if (!known.has(e.id)) freshIds.add(e.id);
-        if (!trafficEntries.length) freshIds.clear();
+        const arrived = trafficEntries.length ? data.entries.filter(e => !known.has(e.id)) : [];
+        for (const e of arrived) freshIds.add(e.id);
         trafficEntries = data.entries;
+        // Same rule as the live socket: past page 1, hold the rows still.
+        if (trafficView.page > 0) {
+            trafficView.pending += arrived.filter(trafficMatches).length;
+            renderTrafficCountsOnly();
+            return;
+        }
         renderTraffic();
     }
 
@@ -455,6 +582,14 @@
             freshIds.add(message.entry.id);
             trafficEntries.push(message.entry);
             if (trafficEntries.length > trafficCapacity) trafficEntries.shift();
+            // Past the first page, a new arrival would shift every row the
+            // operator is reading down by one. Hold the rows still and offer
+            // the new ones instead; the counts above still update.
+            if (trafficView.page > 0) {
+                if (trafficMatches(message.entry)) trafficView.pending++;
+                renderTrafficCountsOnly();
+                return;
+            }
             renderTraffic();
         });
         socket.addEventListener("close", (event) => {
@@ -486,7 +621,51 @@
         connectTraffic();
     }
 
-    document.getElementById("refusedOnly").addEventListener("change", renderTraffic);
+    function renderTrafficCountsOnly() {
+        const accepted = trafficEntries.filter(e => e.accepted).length;
+        document.getElementById("tAccepted").textContent = accepted;
+        document.getElementById("tRefused").textContent = trafficEntries.length - accepted;
+        const newButton = document.getElementById("trafficNew");
+        newButton.hidden = !trafficView.pending;
+        newButton.textContent = `${trafficView.pending} new event${trafficView.pending === 1 ? "" : "s"} — show newest`;
+    }
+
+    // Any change to what is shown goes back to the first page -- page 4 of
+    // the old results means nothing once the results are different.
+    function trafficFromTop() {
+        trafficView.page = 0;
+        trafficView.pending = 0;
+        renderTraffic();
+    }
+
+    document.getElementById("trafficSearch").addEventListener("input", trafficFromTop);
+    for (const id of ["trafficResult", "trafficType", "trafficPageSize"]) {
+        document.getElementById(id).addEventListener("change", trafficFromTop);
+    }
+    document.getElementById("trafficList").addEventListener("click", (event) => {
+        const button = event.target.closest("th button[data-sort]");
+        if (!button) return;
+        const key = button.dataset.sort;
+        if (trafficView.sort === key) {
+            trafficView.dir *= -1;               // same column again reverses it
+        } else {
+            trafficView.sort = key;
+            trafficView.dir = key === "time" ? -1 : 1;   // newest first, A-Z otherwise
+        }
+        trafficFromTop();
+        document.querySelector(`#trafficList th button[data-sort="${key}"]`).focus();
+    });
+    document.getElementById("trafficPrev").addEventListener("click", () => {
+        trafficView.page--;
+        if (trafficView.page === 0) trafficView.pending = 0;   // page 1 shows them
+        renderTraffic();
+    });
+    document.getElementById("trafficNext").addEventListener("click", () => { trafficView.page++; renderTraffic(); });
+    document.getElementById("trafficNew").addEventListener("click", () => {
+        trafficView.sort = "time";
+        trafficView.dir = -1;
+        trafficFromTop();
+    });
 
     showTab(rosterTab);
 
