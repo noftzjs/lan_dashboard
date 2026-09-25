@@ -51,8 +51,28 @@ def test_a_non_ascii_token_is_refused_not_a_server_error(build_server):
 
 # --- the roster manager ------------------------------------------------------
 
-@pytest.mark.parametrize("path", ["/roster", "/analytics", "/api/analytics"])
-def test_operator_pages_require_credentials(server, path):
+@pytest.mark.parametrize("path", ["/roster", "/analytics"])
+def test_operator_pages_send_you_to_the_login_form(server, path):
+    """Pages redirect rather than returning a 401 challenge.
+
+    The challenge is what makes the browser show its own password box, and a
+    credential entered there is cached with no way to clear it -- HTTP Basic
+    has no log out. Redirecting to a form means the session is a cookie that
+    can be dropped."""
+    response = server.get(path, follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/login")
+    assert "WWW-Authenticate" not in response.headers, "a challenge would re-open the browser prompt"
+
+    # The page itself is still not served to an anonymous visitor.
+    followed = server.get(path)
+    assert "Sign in" in followed.text
+    assert server.get(path, auth=ROSTER_AUTH).status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/api/analytics"])
+def test_apis_still_answer_401_rather_than_redirecting(server, path):
+    """A script wants an error it can read, not an HTML login page."""
     assert server.get(path).status_code == 401
     assert server.get(path, auth=ROSTER_AUTH).status_code == 200
 

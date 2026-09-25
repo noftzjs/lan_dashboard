@@ -162,6 +162,7 @@
             <span id="scope"></span>
             <a class="nav-link" href="/">Back to Dashboard</a>
             <a class="nav-link" href="/setup">Setup</a>
+            <button type="button" class="nav-link" id="signOut" hidden>Sign out</button>
             <div id="status" class="disconnected">Loading...</div>
         </div>
     </header>
@@ -812,6 +813,22 @@
     load();
     // History only changes when someone syncs, so a slow refresh is plenty.
     setInterval(load, 60000);
+</script>
+
+<script>
+    (async () => {
+        const button = document.getElementById("signOut");
+        if (!button) return;
+        try {
+            const who = await (await fetch("/api/whoami")).json();
+            if (!who.role) return;                  // Basic, or no session
+            button.hidden = false;
+            button.addEventListener("click", async () => {
+                await fetch("/api/sign-out", { method: "POST" });
+                location.href = "/login";
+            });
+        } catch (e) { /* leave it hidden */ }
+    })();
 </script>
 </body>
 </html>

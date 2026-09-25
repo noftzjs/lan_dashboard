@@ -8,6 +8,7 @@ import os
 import secrets
 import time
 import zipfile
+from urllib.parse import quote
 from datetime import datetime, timezone
 from typing import Any
 
@@ -226,6 +227,46 @@ def require_operator(request: Request,
     if basic_credentials_ok(credentials):
         return ROLE_OPERATOR
     raise _unauthorized("Operator access required")
+
+
+def _wants_html(request: Request) -> bool:
+    return "text/html" in request.headers.get("accept", "")
+
+
+def require_operator_page(request: Request,
+                          credentials: HTTPBasicCredentials | None = Depends(optional_basic)):
+    """Page version of require_operator: sends people to the login form.
+
+    Deliberately does NOT send a WWW-Authenticate challenge. That header is
+    what makes the browser show its own password box, and a credential entered
+    there is cached with no way to clear it -- there is no "log out" in HTTP
+    Basic, which is the whole reason this exists. Redirecting to a form means
+    the session is a cookie that can actually be dropped.
+
+    Basic is still accepted when offered, so scripts and curl keep working; it
+    just is not advertised any more.
+    """
+    if not ROSTER_PASSWORD:
+        raise HTTPException(status_code=500, detail="ROSTER_PASSWORD is not set. Create a .env file (see .env.example) before running the server.")
+    if read_session(request.cookies.get(SESSION_COOKIE)) == ROLE_OPERATOR:
+        return ROLE_OPERATOR
+    if basic_credentials_ok(credentials):
+        return ROLE_OPERATOR
+    raise HTTPException(status_code=303, headers={
+        "Location": f"/login?next={quote(str(request.url.path), safe='')}"})
+
+
+def require_viewer_page(request: Request,
+                        credentials: HTTPBasicCredentials | None = Depends(optional_basic)):
+    """Viewer or operator, redirecting rather than challenging."""
+    if not ROSTER_PASSWORD:
+        raise HTTPException(status_code=500, detail="ROSTER_PASSWORD is not set. Create a .env file (see .env.example) before running the server.")
+    if read_session(request.cookies.get(SESSION_COOKIE)) in VALID_ROLES:
+        return read_session(request.cookies.get(SESSION_COOKIE))
+    if basic_credentials_ok(credentials):
+        return ROLE_OPERATOR
+    raise HTTPException(status_code=303, headers={
+        "Location": f"/login?next={quote(str(request.url.path), safe='')}"})
 
 
 def require_viewer(request: Request,
@@ -954,7 +995,7 @@ async def get_dashboard():
 
 
 @app.get("/roster")
-async def get_roster_page(_user: str = Depends(require_operator)):
+async def get_roster_page(_user: str = Depends(require_operator_page)):
     """Operator-facing roster manager for bulk-editing stream links/tags."""
     return FileResponse(os.path.join(PROJECT_DIR, "roster.html"))
 
@@ -996,6 +1037,20 @@ PUBLIC_URL = os.environ.get("PUBLIC_URL")
 PASSPHRASE_MAX_FAILURES = 10
 PASSPHRASE_WINDOW_SECONDS = 60
 _passphrase_failures: list[float] = []
+
+
+# Same shape as the passphrase limiter below, and global for the same reason:
+# behind a proxy every client can share one address, so per-IP counting would
+# be trivially defeated and would also punish the wrong people.
+LOGIN_MAX_FAILURES = 10
+LOGIN_WINDOW_SECONDS = 60
+_login_failures: list[float] = []
+
+
+def login_locked_out() -> bool:
+    cutoff = time.monotonic() - LOGIN_WINDOW_SECONDS
+    _login_failures[:] = [t for t in _login_failures if t > cutoff]
+    return len(_login_failures) >= LOGIN_MAX_FAILURES
 
 
 def passphrase_locked_out() -> bool:
@@ -1142,7 +1197,7 @@ def download_watcher_bundle(payload: BundleRequest, request: Request):
 
 
 @app.get("/analytics")
-async def get_analytics_page(_user: str = Depends(require_viewer)):
+async def get_analytics_page(_user: str = Depends(require_viewer_page)):
     """Progression analytics over the stored history. Behind the roster
     password while it's still being built out — gating only the page would
     hide the view but not the data, so /api/analytics is gated to match.
@@ -1517,6 +1572,59 @@ async def sign_out():
     response = JSONResponse({"status": "signed out"})
     response.delete_cookie(SESSION_COOKIE)
     return response
+
+
+
+
+class LoginPayload(BaseModel):
+    username: str = ROSTER_USERNAME
+    password: str
+    next: str = "/roster"
+
+
+def safe_next(target: str) -> str:
+    """Only same-site paths. Without this, /login?next=https://evil.example
+    turns the login into an open redirect that borrows this site's name."""
+    if not target.startswith("/") or target.startswith("//"):
+        return "/roster"
+    return target
+
+
+@app.get("/login")
+async def get_login_page(next: str = "/roster"):
+    with open(os.path.join(PROJECT_DIR, "login.html"), encoding="utf-8") as f:
+        return Response(content=f.read(), media_type="text/html")
+
+
+@app.post("/api/login")
+async def log_in(request: Request, payload: LoginPayload):
+    if not ROSTER_PASSWORD:
+        raise HTTPException(status_code=500, detail="ROSTER_PASSWORD is not set. Create a .env file (see .env.example) before running the server.")
+    if login_locked_out():
+        raise HTTPException(status_code=429, detail="Too many attempts. Wait a minute and try again.")
+
+    ok = (safe_equals(payload.username, ROSTER_USERNAME)
+          and safe_equals(payload.password, ROSTER_PASSWORD))
+    if not ok:
+        _login_failures.append(time.monotonic())
+        # One message for a wrong name and a wrong password alike, so the form
+        # cannot be used to find out which usernames exist.
+        raise HTTPException(status_code=401, detail="That username or password is not right.")
+
+    response = JSONResponse({"status": "signed in", "next": safe_next(payload.next)})
+    response.set_cookie(
+        SESSION_COOKIE, make_session(ROLE_OPERATOR),
+        max_age=int(SESSION_DAYS * 86400),
+        httponly=True, samesite="lax",
+        secure=request.url.scheme == "https",
+    )
+    return response
+
+
+@app.get("/api/whoami")
+async def whoami(request: Request):
+    """Lets a page show who is signed in, and hide controls it cannot use."""
+    return {"role": read_session(request.cookies.get(SESSION_COOKIE))}
 
 
 @app.get("/api/leaderboard")

@@ -19,6 +19,15 @@ def mint(client, label="friend@example.com", role="viewer"):
     return response.json()
 
 
+def denied(client, path, **kwargs):
+    """A page refuses an anonymous or under-privileged visitor by sending them
+    to the login form; an API refuses with a 401. Both count as refused."""
+    response = client.get(path, follow_redirects=False, **kwargs)
+    if response.status_code == 303:
+        return response.headers["location"].startswith("/login")
+    return response.status_code == 401
+
+
 def redeem(client, token):
     """Follow the link the way a browser does, keeping the cookie."""
     return client.get(f"/access?k={token}", follow_redirects=False)
@@ -30,7 +39,7 @@ def test_a_link_gets_a_viewer_into_analytics(build_server):
     _, client = build_server()
     token = mint(client)["token"]
 
-    assert client.get("/analytics").status_code == 401, "no link, no entry"
+    assert denied(client, "/analytics"), "no link, no entry"
     assert redeem(client, token).status_code == 303
     assert client.get("/analytics").status_code == 200
     assert client.get("/api/analytics").status_code == 200
@@ -73,7 +82,7 @@ def test_a_viewer_cannot_reach_the_roster(build_server):
     _, client = build_server()
     redeem(client, mint(client)["token"])
 
-    assert client.get("/roster").status_code == 401
+    assert denied(client, "/roster")
     assert client.post("/api/roster/Ayla", json={"tags": ["x"]}).status_code == 401
 
 
@@ -88,8 +97,8 @@ def test_a_tampered_cookie_is_not_an_operator(build_server):
     client.cookies.clear()
 
     tampered = {"Cookie": f"lan_session={good.replace('viewer', 'operator', 1)}"}
-    assert client.get("/roster", headers=tampered).status_code == 401, "editing the role must not promote"
-    assert client.get("/analytics", headers=tampered).status_code == 401, "a broken signature is not a viewer either"
+    assert denied(client, "/roster", headers=tampered), "editing the role must not promote"
+    assert denied(client, "/analytics", headers=tampered), "a broken signature is not a viewer either"
 
     # The untouched cookie still works, so the refusal above is the tampering.
     assert client.get("/analytics", headers={"Cookie": f"lan_session={good}"}).status_code == 200
@@ -99,8 +108,7 @@ def test_garbage_cookies_are_refused(build_server):
     _, client = build_server()
     for value in ("", "nonsense", "operator:9999999999:deadbeef", "operator:notanumber:x",
                   "viewer:9999999999:", ":::"):
-        assert client.get("/analytics",
-                          headers={"Cookie": f"lan_session={value}"}).status_code == 401,             f"accepted {value!r}"
+        assert denied(client, "/analytics", headers={"Cookie": f"lan_session={value}"}),             f"accepted {value!r}"
 
 
 def test_an_expired_session_stops_working(build_server):
@@ -122,8 +130,7 @@ def test_an_expired_session_stops_working(build_server):
     finally:
         module.SESSION_DAYS = original
 
-    assert client.get("/analytics",
-                      headers={"Cookie": f"lan_session={expired}"}).status_code == 401
+    assert denied(client, "/analytics", headers={"Cookie": f"lan_session={expired}"})
     # The same cookie with a live expiry works, so the refusal is the expiry
     # and not something else about how it was made.
     assert client.get("/analytics",
@@ -193,7 +200,7 @@ def test_signing_out_drops_the_session(build_server):
     assert client.get("/analytics").status_code == 200
 
     client.post("/api/sign-out")
-    assert client.get("/analytics").status_code == 401
+    assert denied(client, "/analytics")
 
 
 # --- input handling ---------------------------------------------------------------

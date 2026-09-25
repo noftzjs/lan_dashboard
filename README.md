@@ -169,7 +169,9 @@ These two are the same question split in two: who is allowed to see what. Worth 
 
   Each token being separate is the whole point: you can see who is actually using it, and revoke one person without changing anything for anyone else.
 
-- [ ] **A real admin area, separate from viewing.** `/roster` is protected by the same credential as `/analytics` today, which means the two roles cannot be told apart. The admin area is where the operator-only things belong &mdash; roster editing, the hide/lockout toggle already logged above, report generation, and a networking tab showing live incoming traffic.
+- [x] **Operator login** *(done 2026-09-25)*: `/login` with a form, a session cookie, sign-out on both gated pages, and rate limiting on attempts. Pages now redirect there instead of sending a `WWW-Authenticate` challenge &mdash; that header is what makes the browser show its own password box, and a credential entered there is cached with no way to clear it. Basic is still accepted when offered, so scripts and curl keep working; it is simply no longer advertised, so browsers stop caching it. The `next` parameter is validated server-side against off-site targets.
+
+- [ ] **The rest of the admin area.** `/roster` is protected by the same credential as `/analytics` today, which means the two roles cannot be told apart. The admin area is where the operator-only things belong &mdash; roster editing, the hide/lockout toggle already logged above, report generation, and a networking tab showing live incoming traffic.
 
   **Two roles is enough:** operator and viewer. Everything currently behind `ROSTER_PASSWORD` splits along that line.
 
