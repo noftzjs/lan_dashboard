@@ -1,27 +1,30 @@
 import collections
 import contextlib
-import itertools
 import hashlib
 import hmac
 import io
+import itertools
 import json
 import logging
 import os
 import secrets
 import time
 import zipfile
-from urllib.parse import quote
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote
 
 import aiosqlite
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("lan_dashboard")
@@ -1695,6 +1698,55 @@ operator_manager = ConnectionManager()
 
 async def broadcast_traffic(entry: dict):
     await operator_manager.broadcast({"type": "traffic", "entry": entry})
+
+
+# Two refusals happen before receive_log_update ever runs: a request body
+# that isn't a LogPayload (422), and a wrong or missing ingestion token
+# (401). Both used to be invisible here -- exactly the silence this log
+# exists to end. The token case is the likely one on the night: someone
+# still running a watcher downloaded before the token was rotated.
+#
+# Scoped to the ingest path only, and each handler hands back the same
+# response FastAPI would have sent, so no client sees a difference.
+INGEST_PATH = "/api/log-update"
+
+
+async def _ingest_body_text(request: Request) -> str:
+    """The payload as the operator would want to see it: the "data" string
+    when the body is JSON that has one, otherwise the raw text."""
+    raw = (await request.body()).decode("utf-8", errors="replace")
+    try:
+        data = json.loads(raw).get("data")
+        if isinstance(data, str):
+            return data
+    except (ValueError, AttributeError):
+        pass
+    return raw
+
+
+@app.exception_handler(RequestValidationError)
+async def record_malformed_ingest(request: Request, exc: RequestValidationError):
+    if request.url.path == INGEST_PATH:
+        problems = "; ".join(
+            f"{'.'.join(str(p) for p in e.get('loc', ())[1:]) or 'body'}: {e.get('msg', '')}"
+            for e in exc.errors()
+        )
+        await broadcast_traffic(record_traffic(
+            False, await _ingest_body_text(request),
+            f"Request refused before reading it (HTTP 422) -- {problems}"))
+    return await request_validation_exception_handler(request, exc)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def record_unauthorised_ingest(request: Request, exc: StarletteHTTPException):
+    if request.url.path == INGEST_PATH and exc.status_code == 401:
+        # Never echo the token that was sent -- a near-miss of the real one
+        # is still worth keeping off anyone's screen.
+        await broadcast_traffic(record_traffic(
+            False, await _ingest_body_text(request),
+            "Wrong or missing ingestion token (HTTP 401) -- this watcher's "
+            "config is out of date; have them re-download from /setup"))
+    return await http_exception_handler(request, exc)
 
 
 @app.get("/api/traffic")

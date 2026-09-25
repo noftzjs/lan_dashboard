@@ -13,7 +13,7 @@ place it is ever visible as it happens.
 import threading
 
 import pytest
-from conftest import accepted, rejected
+from conftest import accepted, post_event, rejected
 
 OPERATOR = ("admin", "testpass")
 STAMP = 1790000000
@@ -193,3 +193,80 @@ def test_a_refusal_reaches_a_listening_operator(build_server):
 
     assert message["entry"]["accepted"] is False
     assert "99" in message["entry"]["detail"]
+
+
+# --- refused before the handler runs -----------------------------------------
+# A body that isn't a LogPayload, or a wrong token, is refused by FastAPI
+# before receive_log_update runs. Both used to leave no trace here, which
+# made them look exactly like silence.
+
+def test_a_malformed_request_is_recorded_and_still_refused(build_server):
+    _, client = build_server()
+    response = client.post("/api/log-update", json={"data": f"Ayla,ZONE,{STAMP},Ironforge"})
+    assert response.status_code == 422, "the watcher must see the same refusal as before"
+
+    entry = traffic(client)["entries"][-1]
+    assert entry["accepted"] is False
+    assert "422" in entry["detail"] and "timestamp" in entry["detail"]
+    assert entry["payload"] == f"Ayla,ZONE,{STAMP},Ironforge", "the data string, not the JSON around it"
+    assert entry["player"] == "Ayla"
+
+
+def test_a_body_that_is_not_json_is_recorded(build_server):
+    _, client = build_server()
+    response = client.post("/api/log-update", content=b"not json at all",
+                           headers={"Content-Type": "application/json"})
+    assert response.status_code == 422
+
+    entry = traffic(client)["entries"][-1]
+    assert entry["accepted"] is False
+    assert entry["payload"] == "not json at all"
+    assert entry["player"] is None
+
+
+def test_a_wrong_token_is_recorded_without_echoing_it(build_server):
+    """The likely case on the night: a watcher downloaded before the token
+    was rotated. It must show up -- and the near-miss token must not."""
+    _, client = build_server(INGESTION_TOKEN="s3cret")
+    response = post_event(client, f"Ayla,ZONE,{STAMP},Ironforge", token="s3cret-old")
+    assert response.status_code == 401, "the watcher must see the same refusal as before"
+
+    entry = traffic(client)["entries"][-1]
+    assert entry["accepted"] is False
+    assert "token" in entry["detail"].lower()
+    assert entry["player"] == "Ayla"
+    assert "s3cret-old" not in str(entry)
+
+
+def test_a_missing_token_is_recorded(build_server):
+    _, client = build_server(INGESTION_TOKEN="s3cret")
+    assert post_event(client, f"Ayla,ZONE,{STAMP},Ironforge").status_code == 401
+    assert traffic(client)["refused"] == 1
+
+
+def test_the_right_token_is_still_accepted(build_server):
+    _, client = build_server(INGESTION_TOKEN="s3cret")
+    accepted(client, f"Ayla,ZONE,{STAMP},Ironforge", token="s3cret")
+    data = traffic(client)
+    assert data["accepted"] == 1 and data["refused"] == 0
+
+
+def test_refusals_elsewhere_are_not_ingest_traffic(build_server):
+    """Only the ingest path is watched. A visitor hitting an operator API
+    without signing in is not a watcher problem and must not fill the log."""
+    _, client = build_server()
+    assert client.get("/api/traffic").status_code == 401
+    assert client.post("/api/login", json={}).status_code == 422
+    assert traffic(client)["kept"] == 0
+
+
+def test_a_live_operator_sees_a_token_refusal(build_server):
+    _, client = build_server(INGESTION_TOKEN="s3cret")
+    client.post("/api/login", json={"username": "admin", "password": "testpass"})
+
+    with client.websocket_connect("/ws/traffic") as socket:
+        post_event(client, f"Ayla,ZONE,{STAMP},Ironforge", token="wrong")
+        message = receive_within(socket)
+
+    assert message["entry"]["accepted"] is False
+    assert "token" in message["entry"]["detail"].lower()
