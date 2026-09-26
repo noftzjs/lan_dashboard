@@ -7,6 +7,7 @@ import itertools
 import json
 import logging
 import os
+import re
 import secrets
 import time
 import zipfile
@@ -147,7 +148,27 @@ _traffic_counter = itertools.count(1)
 TRAFFIC_PAYLOAD_PREVIEW = 160
 
 
-def record_traffic(accepted: bool, payload: str, detail: str | None = None) -> dict:
+# Where an event came from, as far as the server can tell. A watcher sends two
+# opaque ids alongside each event: a random one it generated on first run
+# (one per install) and a hash of the WoW account folder it is reading (one
+# per account, shared by every character on it). Neither is a secret or a
+# credential -- they only say which characters belong together.
+#
+# Both are optional, since watchers older than this send neither, and
+# anything that is not plain hex is dropped rather than refusing the event:
+# a garbled id is no reason to lose someone's level-up.
+SOURCE_ID_RE = re.compile(r"[0-9a-f]{8,64}")
+
+
+def clean_source_id(value) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip().lower()
+    return value if SOURCE_ID_RE.fullmatch(value) else None
+
+
+def record_traffic(accepted: bool, payload: str, detail: str | None = None,
+                   watcher_id: str | None = None, account_id: str | None = None) -> dict:
     """Adds one entry and returns it, so the caller can broadcast the same dict."""
     player, comma, rest = payload.partition(",")
     log_type, _, _ = rest.partition(",")
@@ -166,6 +187,10 @@ def record_traffic(accepted: bool, payload: str, detail: str | None = None) -> d
         "payload": payload[:TRAFFIC_PAYLOAD_PREVIEW],
         "truncated": len(payload) > TRAFFIC_PAYLOAD_PREVIEW,
         "detail": detail,
+        # Which install sent it -- the question behind most "my stats aren't
+        # showing" reports once more than one PC is involved.
+        "watcher_id": clean_source_id(watcher_id),
+        "account_id": clean_source_id(account_id),
     }
     _traffic.append(entry)
     return entry
@@ -451,6 +476,27 @@ async def startup_event():
             )
         """)
 
+        # Which watcher installs and WoW accounts each character has been
+        # seen from. One row per combination rather than a column on the
+        # character, because the useful answers are many-to-many: a person
+        # plays several characters, and one character can arrive from two
+        # PCs. People are worked out from this at read time (see
+        # /api/people), so a wrong grouping is never baked into the data.
+        #
+        # '' rather than NULL for "not sent": SQLite treats every NULL as
+        # distinct, which would give each event its own row.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS character_sources (
+                player TEXT NOT NULL,
+                watcher_id TEXT NOT NULL DEFAULT '',
+                account_id TEXT NOT NULL DEFAULT '',
+                first_seen TEXT,
+                last_seen TEXT,
+                events INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (player, watcher_id, account_id)
+            )
+        """)
+
         # Operator-curated metadata the game has no way of telling us:
         # a streaming link and freeform tags (group assignment, "LAN local", etc).
         await db.execute("""
@@ -555,6 +601,9 @@ manager = ConnectionManager()
 class LogPayload(BaseModel):
     timestamp: str
     data: str
+    # Sent by watchers from 2026-09-26 on; see clean_source_id.
+    watcher_id: str | None = None
+    account_id: str | None = None
 
 class RosterMetaPayload(BaseModel):
     # Fields left as None are unchanged; send "" / [] explicitly to clear one.
@@ -686,6 +735,8 @@ def extract_event_time_field(rest: str) -> datetime | None:
 
 @app.post("/api/log-update")
 async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_ingestion_token)):
+    watcher_id = clean_source_id(payload.watcher_id)
+    account_id = clean_source_id(payload.account_id)
     try:
         # Only split off the player name and log type here — the remainder is
         # split per-type below so free-text fields (guild/zone names) can
@@ -971,6 +1022,17 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
             """, (player_name, state["level"], state["current_xp"], state["max_xp"], state["pct"],
                   state["last_updated"], state["last_activity"]))
 
+            # Only for events that were accepted: a refused payload can name
+            # any character, and linking on it would let a typo claim one.
+            if watcher_id or account_id:
+                await db.execute("""
+                    INSERT INTO character_sources (player, watcher_id, account_id, first_seen, last_seen, events)
+                    VALUES (?, ?, ?, ?, ?, 1)
+                    ON CONFLICT(player, watcher_id, account_id) DO UPDATE SET
+                        last_seen=excluded.last_seen, events=events + 1
+                """, (player_name, watcher_id or "", account_id or "",
+                      state["last_activity"], state["last_activity"]))
+
             await db.commit()
 
         # Broadcast the data out live to viewers
@@ -980,14 +1042,14 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
             "state": public_state(player_states[player_name]),
         })
 
-        await broadcast_traffic(record_traffic(True, payload.data))
+        await broadcast_traffic(record_traffic(True, payload.data, None, watcher_id, account_id))
         return {"status": "success"}
     except Exception as e:
         logger.exception("Failed to process log-update payload: %r", payload.data)
         # Refusals matter more than acceptances here. A rejected event is gone
         # for good -- the watcher's sent_count has already moved past it -- so
         # this is the only place it is ever visible as it happens.
-        await broadcast_traffic(record_traffic(False, payload.data, str(e)))
+        await broadcast_traffic(record_traffic(False, payload.data, str(e), watcher_id, account_id))
         return {"status": "error", "detail": str(e)}
 
 # --- OPERATOR-CURATED ROSTER METADATA ---
@@ -1711,17 +1773,19 @@ async def broadcast_traffic(entry: dict):
 INGEST_PATH = "/api/log-update"
 
 
-async def _ingest_body_text(request: Request) -> str:
-    """The payload as the operator would want to see it: the "data" string
-    when the body is JSON that has one, otherwise the raw text."""
+async def _ingest_body(request: Request) -> tuple[str, str | None, str | None]:
+    """The payload as the operator would want to see it -- the "data" string
+    when the body is JSON that has one, otherwise the raw text -- plus the
+    watcher and account ids if it carried them. A refused request is exactly
+    when knowing which install sent it helps most."""
     raw = (await request.body()).decode("utf-8", errors="replace")
     try:
-        data = json.loads(raw).get("data")
-        if isinstance(data, str):
-            return data
+        body = json.loads(raw)
+        data = body.get("data")
+        return (data if isinstance(data, str) else raw,
+                body.get("watcher_id"), body.get("account_id"))
     except (ValueError, AttributeError):
-        pass
-    return raw
+        return raw, None, None
 
 
 @app.exception_handler(RequestValidationError)
@@ -1731,9 +1795,10 @@ async def record_malformed_ingest(request: Request, exc: RequestValidationError)
             f"{'.'.join(str(p) for p in e.get('loc', ())[1:]) or 'body'}: {e.get('msg', '')}"
             for e in exc.errors()
         )
+        text, watcher_id, account_id = await _ingest_body(request)
         await broadcast_traffic(record_traffic(
-            False, await _ingest_body_text(request),
-            f"Request refused before reading it (HTTP 422) -- {problems}"))
+            False, text, f"Request refused before reading it (HTTP 422) -- {problems}",
+            watcher_id, account_id))
     return await request_validation_exception_handler(request, exc)
 
 
@@ -1742,11 +1807,77 @@ async def record_unauthorised_ingest(request: Request, exc: StarletteHTTPExcepti
     if request.url.path == INGEST_PATH and exc.status_code == 401:
         # Never echo the token that was sent -- a near-miss of the real one
         # is still worth keeping off anyone's screen.
+        text, watcher_id, account_id = await _ingest_body(request)
         await broadcast_traffic(record_traffic(
-            False, await _ingest_body_text(request),
+            False, text,
             "Wrong or missing ingestion token (HTTP 401) -- this watcher's "
-            "config is out of date; have them re-download from /setup"))
+            "config is out of date; have them re-download from /setup",
+            watcher_id, account_id))
     return await http_exception_handler(request, exc)
+
+
+
+@app.get("/api/people")
+async def get_people(_user: str = Depends(require_operator)):
+    """Characters grouped into the people playing them.
+
+    Two characters belong to the same person when they share a watcher
+    install or a WoW account -- and that chains: an alt on the same account
+    as a main, played on the same PC as a third character, makes all three
+    one person. Worked out on every request from character_sources rather
+    than stored, so nothing has to be rewritten if the rule changes.
+
+    Known limits, both from what the ids can and cannot see: two people
+    sharing one PC share one install and are merged, and one person on two
+    PCs with two accounts looks like two people. A manual merge/split on the
+    roster page is the planned answer to both.
+    """
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT player, watcher_id, account_id, first_seen, last_seen, events FROM character_sources")
+        rows = [dict(r) for r in await cursor.fetchall()]
+
+    # Union-find over characters, joined through each shared id.
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    first_with: dict[tuple[str, str], str] = {}
+    for r in rows:
+        find(r["player"])
+        for kind in ("watcher_id", "account_id"):
+            if r[kind]:
+                key = (kind, r[kind])
+                if key in first_with:
+                    parent[find(r["player"])] = find(first_with[key])
+                else:
+                    first_with[key] = r["player"]
+
+    groups: dict[str, dict] = {}
+    for r in rows:
+        g = groups.setdefault(find(r["player"]), {
+            "characters": set(), "watcher_ids": set(), "account_ids": set(),
+            "first_seen": r["first_seen"], "last_seen": r["last_seen"], "events": 0,
+        })
+        g["characters"].add(r["player"])
+        if r["watcher_id"]:
+            g["watcher_ids"].add(r["watcher_id"])
+        if r["account_id"]:
+            g["account_ids"].add(r["account_id"])
+        g["first_seen"] = min(g["first_seen"], r["first_seen"])
+        g["last_seen"] = max(g["last_seen"], r["last_seen"])
+        g["events"] += r["events"]
+
+    people = [{**g, **{k: sorted(g[k]) for k in ("characters", "watcher_ids", "account_ids")}}
+              for g in groups.values()]
+    people.sort(key=lambda p: p["last_seen"], reverse=True)
+    return {"people": people}
 
 
 @app.get("/api/traffic")

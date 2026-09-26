@@ -48,9 +48,11 @@ Two ways to run:
 import argparse
 import contextlib
 import glob
+import hashlib
 import json
 import os
 import re
+import secrets
 import string
 import sys
 import threading
@@ -80,6 +82,10 @@ if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
 SCRIPT_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "savedvars_watcher_config.json")
 STATE_PATH = os.path.join(SCRIPT_DIR, ".savedvars_watcher_state.json")
+# This install's id, in a file of its own rather than inside the state file:
+# the state file is the one someone deletes to "reset" the watcher, and that
+# should not also make this PC look like a different person to the server.
+WATCHER_ID_PATH = os.path.join(SCRIPT_DIR, ".savedvars_watcher_id")
 BACKUP_CSV = os.path.join(SCRIPT_DIR, "savedvars_watcher_backup.csv")
 ERROR_LOG = os.path.join(SCRIPT_DIR, "savedvars_watcher_errors.log")
 # Everything the watcher says, not just errors — the only place to read it
@@ -287,6 +293,61 @@ def save_state(state):
         json.dump(state, f)
 
 
+# --- Identity ------------------------------------------------------------------
+# Two ids ride along with every event so the server can tell which characters
+# belong to the same person. Neither is a credential; they only link things.
+
+WATCHER_ID_RE = re.compile(r"[0-9a-f]{32}")
+
+
+def load_watcher_id(path=None):
+    """This install's id: random, made on first run, kept next to the watcher.
+
+    If the file cannot be written (a read-only folder, say) the id still
+    works for this run -- it just will not survive a restart, which costs a
+    link, not any data."""
+    path = path or WATCHER_ID_PATH
+    try:
+        with open(path, encoding="utf-8") as f:
+            existing = f.read().strip().lower()
+        if WATCHER_ID_RE.fullmatch(existing):
+            return existing
+    except OSError:
+        pass
+    new_id = secrets.token_hex(16)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(new_id)
+    except OSError as e:
+        log_error(f"Could not save this watcher's id ({e}); it will change on restart.")
+    return new_id
+
+
+def account_id_for(savedvars_path):
+    """A stable stand-in for the WoW account this file belongs to.
+
+    SavedVariables live at .../WTF/Account/<ACCOUNT>/SavedVariables/, and
+    every character on that account shares the one file -- so the folder name
+    is what links a person's characters, even across a watcher reinstall.
+    Only a hash is sent, since the server has no use for the real account
+    number. It is a pseudonym, not a secret: account numbers are short
+    enough that someone with this hash and time could guess the original,
+    which is one reason the server only shows it to the operator.
+
+    Split on both slash kinds so this behaves the same whichever OS runs it,
+    and matched without case because Windows paths do not care."""
+    if not savedvars_path:
+        return None
+    parts = re.split(r"[\\/]+", savedvars_path)
+    for i in range(len(parts) - 2):
+        if parts[i].lower() == "wtf" and parts[i + 1].lower() == "account":
+            account = parts[i + 2].strip().upper()
+            if account and account.lower() != "savedvariables":
+                digest = hashlib.sha256(f"lan-dashboard-account:{account}".encode()).hexdigest()
+                return digest[:16]
+    return None
+
+
 def unescape_lua_string(value):
     return value.replace('\\"', '"').replace("\\\\", "\\")
 
@@ -378,8 +439,11 @@ class AuthFailed(Exception):
     and retried once the token is fixed — not skipped."""
 
 
-def send_packet(server_url, payload, ingestion_token=None, timeout=2.0):
+def send_packet(server_url, payload, ingestion_token=None, timeout=2.0, source=None):
     body = {"timestamp": datetime.now().isoformat(), "data": payload}
+    # watcher_id / account_id. Extra body fields are ignored by a server
+    # older than this, so a new watcher is safe against an old deployment.
+    body.update({k: v for k, v in (source or {}).items() if v})
     headers = {"X-Ingestion-Token": ingestion_token} if ingestion_token else {}
     response = SESSION.post(server_url, json=body, headers=headers, timeout=timeout)
     if response.status_code in (401, 403):
@@ -405,7 +469,11 @@ def watch(config, stop_event, chosen_path=None):
     path = config["savedvars_path"]
     poll = config["poll_interval"]
 
+    watcher_id = load_watcher_id()
     say(f"Forwarding to {config['server_url']}")
+    # Short form, as the Traffic tab shows it, so an operator can ask
+    # "what does your log say your id is?" and match a PC to its rows.
+    say(f"This watcher's id: {watcher_id[:8]}")
     if state["sent_count"]:
         say(f"Resuming — {state['sent_count']} events already forwarded in a previous run")
     if path:
@@ -537,7 +605,8 @@ def watch(config, stop_event, chosen_path=None):
                 save_state(state)
                 continue
             try:
-                send_packet(config["server_url"], payload, config["ingestion_token"])
+                send_packet(config["server_url"], payload, config["ingestion_token"],
+                            source={"watcher_id": watcher_id, "account_id": account_id_for(path)})
                 state["sent_count"] += 1
                 state["last_sent"] = payload
                 delivered += 1

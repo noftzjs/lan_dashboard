@@ -146,6 +146,7 @@
         .verdict.no { color: var(--live-color); background-color: rgba(230, 57, 79, 0.14); }
         #trafficList tr.refused td { background-color: rgba(230, 57, 79, 0.05); }
         #trafficList .reason { color: var(--live-color); font-size: 12px; margin-top: 3px; }
+        #trafficList .via { color: var(--text-dim); font-family: ui-monospace, Consolas, monospace; font-size: 11px; margin-top: 2px; }
         /* A new row flashes briefly so a live arrival is noticeable without
            animating the whole list; skipped for anyone who asked for less motion. */
         @keyframes arrive { from { background-color: rgba(243, 167, 60, 0.18); } to { background-color: transparent; } }
@@ -199,7 +200,7 @@
         </div>
         <p class="access-empty" style="padding-top:0">Every event a watcher sends, newest first. A refused event is gone for good &mdash; the watcher has already moved past it &mdash; so this is the only place it shows up as it happens.</p>
         <div class="traffic-tools">
-            <input type="search" id="trafficSearch" placeholder="Search character, type, payload or reason" autocomplete="off" aria-label="Search traffic">
+            <input type="search" id="trafficSearch" placeholder="Search character, type, payload, reason or watcher id" autocomplete="off" aria-label="Search traffic">
             <label>Result
                 <select id="trafficResult">
                     <option value="all">All</option>
@@ -447,7 +448,9 @@
         if (type && e.log_type !== type) return false;
         const q = document.getElementById("trafficSearch").value.trim().toLowerCase();
         if (!q) return true;
-        return [e.player, e.log_type, e.payload, e.detail].some(v => v && v.toLowerCase().includes(q));
+        // The watcher id too, so "which rows came from this PC?" is one search:
+        // its log prints the same short form the table shows.
+        return [e.player, e.log_type, e.payload, e.detail, e.watcher_id].some(v => v && v.toLowerCase().includes(q));
     }
 
     // The type list is built from what has actually arrived, so it never
@@ -519,7 +522,8 @@
                 <tr class="${e.accepted ? "" : "refused"} ${freshIds.has(e.id) ? "fresh" : ""}">
                     <td class="when">${time(e.at)}</td>
                     <td><span class="verdict ${e.accepted ? "ok" : "no"}">${e.accepted ? "Accepted" : "Refused"}</span></td>
-                    <td>${escapeHtml(e.player || "\u2014")}</td>
+                    <td>${escapeHtml(e.player || "\u2014")}${e.watcher_id
+                        ? `<div class="via" title="Watcher install ${escapeHtml(e.watcher_id)}">via ${escapeHtml(e.watcher_id.slice(0, 8))}</div>` : ""}</td>
                     <td>${escapeHtml(e.log_type || "\u2014")}</td>
                     <td class="payload">${escapeHtml(e.payload)}${e.truncated ? "\u2026" : ""}
                         ${e.detail ? `<div class="reason">${escapeHtml(e.detail)}</div>` : ""}</td>

@@ -13,6 +13,7 @@ downloads/
 savedvars_watcher.log
 mock_generator.py
 .savedvars_watcher_state.json
+.savedvars_watcher_id
 .watcher_state.json
 savedvars_watcher_backup.csv
 savedvars_watcher_errors.log
