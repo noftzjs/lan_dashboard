@@ -49,3 +49,6 @@ run_demo.cmd
 
 # Working notes and backlog, kept locally rather than on the public repo.
 BACKLOG.md
+
+# Local load-test tool: writes fake characters to whatever server it targets.
+loadtest.py

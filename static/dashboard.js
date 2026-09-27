@@ -139,6 +139,10 @@ function connectWebSocket(onUpdate) {
             if (msg.stale_after_seconds != null) staleAfterSeconds = msg.stale_after_seconds;
         } else if (msg.event === "PLAYER_UPDATE") {
             playerData[msg.player] = stampReceived(msg.state);
+        } else if (msg.event === "PLAYER_REMOVED") {
+            // The operator hid this character. Dropped at once, so it leaves
+            // the big screen while people are looking, not at the next reload.
+            delete playerData[msg.player];
         }
         if (onUpdate) onUpdate();
     };

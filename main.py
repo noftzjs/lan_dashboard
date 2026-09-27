@@ -1,3 +1,4 @@
+import asyncio
 import collections
 import contextlib
 import hashlib
@@ -9,6 +10,7 @@ import logging
 import os
 import re
 import secrets
+import sqlite3
 import time
 import zipfile
 from datetime import datetime, timezone
@@ -112,6 +114,19 @@ DB_FILE = os.environ.get("DB_FILE", "lan_progression.db")
 # looks stale; raise this if that hides people who are really playing.
 STALE_AFTER_SECONDS = float(os.environ.get("STALE_AFTER_MINUTES", "60")) * 60
 player_states: dict[str, dict[str, Any]] = {}
+
+# Characters the operator has taken off every public view. Anyone can name a
+# character anything, and that name reached the big screen the moment their
+# watcher synced, with no way to take it down short of editing the database.
+#
+# A set of its own rather than a flag in each character's state: state is
+# what gets sent to browsers, and this should never travel with it. Hiding is
+# not deleting -- events keep being recorded, so un-hiding restores everything.
+hidden_players: set[str] = set()
+
+
+def is_public(name: str) -> bool:
+    return name not in hidden_players
 
 def idle_seconds(state: dict[str, Any]) -> float | None:
     """Seconds since this character's last accepted event, or None if the
@@ -362,6 +377,13 @@ def require_viewer(request: Request,
 async def startup_event():
     """Initializes the SQLite database tables on server boot."""
     async with aiosqlite.connect(DB_FILE) as db:
+        # Write-ahead logging, so reads (analytics, the roster) no longer
+        # block writes and writes no longer block reads. Without it, load
+        # testing 200 watchers had 8% of events refused as "database is
+        # locked". Persistent: stored in the file, so this only changes
+        # anything the first time. Adds -wal and -shm files beside the
+        # database -- back up all three, or stop the server first.
+        await db.execute("PRAGMA journal_mode=WAL")
         # Table to store every granular historical event for graphing later
         await db.execute("""
             CREATE TABLE IF NOT EXISTS xp_history (
@@ -512,8 +534,12 @@ async def startup_event():
         # player can have, say, a Twitch and a Kick. The old column is kept
         # and migrated from rather than dropped, so a rollback still reads.
         cursor = await db.execute("PRAGMA table_info(player_roster_meta)")
-        if "stream_urls" not in {row[1] for row in await cursor.fetchall()}:
+        meta_columns = {row[1] for row in await cursor.fetchall()}
+        if "stream_urls" not in meta_columns:
             await db.execute("ALTER TABLE player_roster_meta ADD COLUMN stream_urls TEXT")
+        # hidden_at doubles as the flag: set means hidden, and it says since when.
+        if "hidden_at" not in meta_columns:
+            await db.execute("ALTER TABLE player_roster_meta ADD COLUMN hidden_at TEXT")
         await db.execute("""
             UPDATE player_roster_meta
                SET stream_urls = json_array(stream_url)
@@ -575,26 +601,91 @@ async def reload_states_from_db():
                 elif row["stream_url"]:
                     state["stream_urls"] = [row["stream_url"]]
                 state["tags"] = json.loads(row["tags"]) if row["tags"] else []
+                if row["hidden_at"]:
+                    hidden_players.add(row["player"])
 
 # --- WEBSOCKET CONNECTION MANAGER ---
 class ConnectionManager:
-    def __init__(self):
-        self.active_connections: list[WebSocket] = []
+    """Fans messages out to open sockets without anyone waiting on anyone.
 
-    async def connect(self, websocket: WebSocket):
+    Each socket gets its own queue and its own writer task. broadcast() only
+    drops the message into every queue and returns, so an ingest request never
+    waits on a browser. It used to: the old broadcast awaited each send in
+    turn inside the request, so one dashboard that stopped reading -- a laptop
+    gone to sleep, a phone on bad wifi -- could hold up every watcher and
+    every other screen until TCP gave up on it, which can take minutes.
+
+    A socket that falls MAX_QUEUED messages behind, or takes SEND_TIMEOUT to
+    accept one, is closed rather than waited on. The dashboard reconnects on
+    its own and starts again from a fresh INIT snapshot, so being dropped
+    costs it a blink, not data.
+
+    Per-socket queues also keep each socket's messages in order, which
+    concurrent sends would not.
+    """
+    MAX_QUEUED = 500
+    SEND_TIMEOUT = 5.0
+
+    def __init__(self):
+        self.queues: dict[WebSocket, asyncio.Queue] = {}
+        self.writers: dict[WebSocket, asyncio.Task] = {}
+
+    @property
+    def active_connections(self) -> list[WebSocket]:
+        return list(self.queues)
+
+    async def connect(self, websocket: WebSocket, first_message: dict | None = None):
+        """first_message is queued before the socket can receive any
+        broadcast, and built by the caller with no await in between -- so a
+        snapshot can never arrive after, and overwrite, a newer update."""
         await websocket.accept()
-        self.active_connections.append(websocket)
+        queue: asyncio.Queue = asyncio.Queue(maxsize=self.MAX_QUEUED)
+        if first_message is not None:
+            queue.put_nowait(json.dumps(first_message))
+        self.queues[websocket] = queue
+        self.writers[websocket] = asyncio.create_task(self._writer(websocket, queue))
+
+    async def _writer(self, websocket: WebSocket, queue: asyncio.Queue):
+        try:
+            while True:
+                text = await queue.get()
+                await asyncio.wait_for(websocket.send_text(text), self.SEND_TIMEOUT)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 -- any failure to send means the same thing
+            # Closed, or too slow to take one message: let it go.
+            self._drop(websocket)
+
+    def _drop(self, websocket: WebSocket):
+        self.queues.pop(websocket, None)
+        writer = self.writers.pop(websocket, None)
+        if writer is not None and writer is not asyncio.current_task():
+            writer.cancel()
+
+        async def close():
+            # Bounded, since a socket too slow to read is likely too slow to
+            # close; 1013 is "try again later", and the page reconnects.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(websocket.close(code=1013), 2.0)
+
+        asyncio.get_running_loop().create_task(close())
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        self.queues.pop(websocket, None)
+        writer = self.writers.pop(websocket, None)
+        if writer is not None:
+            writer.cancel()
 
     async def broadcast(self, message: dict):
-        for connection in self.active_connections:
-            # A spectator whose tab just closed shouldn't stop the broadcast
-            # reaching everyone else; the socket is dropped from the list by
-            # disconnect() when its own endpoint coroutine notices.
-            with contextlib.suppress(Exception):
-                await connection.send_json(message)
+        # Encoded once, not once per socket: sixty dashboards used to mean
+        # sixty json.dumps of the same message for every event.
+        text = json.dumps(message)
+        for websocket, queue in list(self.queues.items()):
+            try:
+                queue.put_nowait(text)
+            except asyncio.QueueFull:
+                logger.warning("A dashboard fell %d messages behind; disconnecting it", self.MAX_QUEUED)
+                self._drop(websocket)
 
 manager = ConnectionManager()
 
@@ -733,6 +824,76 @@ def extract_event_time_field(rest: str) -> datetime | None:
     return datetime.fromtimestamp(epoch, timezone.utc)
 
 
+# How an event reaches the database, shaped by load testing.
+#
+# First version: a new aiosqlite connection per event, one await per
+# statement. With dozens of events at once (everyone syncing together) they
+# fought over SQLite's file lock, each loser sleeping and retrying -- seconds
+# of latency, then "database is locked", and the event was lost.
+#
+# Now: the event's statements are collected while it is processed, then run
+# together on one connection that stays open, synchronously, right here on
+# the event loop. That sounds wrong for an async server, and was measured
+# instead of assumed: the writes for one event take ~0.2 ms (1 ms at p95).
+# Every alternative tried -- a lock, a database thread -- spent far longer
+# handing work to and from the loop than the work itself took, and under a
+# burst of 200 watchers queued requests for seconds behind those handovers.
+#
+# With no await between processing an event and writing it, each event is
+# also applied whole, in arrival order, with no lock needed.
+_ingest_conn: sqlite3.Connection | None = None
+
+
+class _PendingWrites:
+    """Stands in for a connection while one event is processed."""
+
+    def __init__(self):
+        self.statements: list[tuple[str, tuple]] = []
+
+    async def execute(self, sql: str, params: tuple = ()):
+        self.statements.append((sql, tuple(params)))
+
+    async def commit(self):
+        """Applied by ingest_transaction on the way out, all at once."""
+
+
+def _apply_writes(statements: list[tuple[str, tuple]]):
+    global _ingest_conn
+    if _ingest_conn is None:
+        # check_same_thread=False only because the tests run each app on a
+        # thread of their own; the server itself only ever uses it from the loop.
+        _ingest_conn = sqlite3.connect(DB_FILE, check_same_thread=False, timeout=5)
+        # Safe with WAL: a crash of this process loses nothing committed;
+        # only a power cut can drop the last moments, not corrupt the file.
+        _ingest_conn.execute("PRAGMA synchronous=NORMAL")
+    try:
+        for sql, params in statements:
+            _ingest_conn.execute(sql, params)
+        _ingest_conn.commit()
+    except BaseException:
+        _ingest_conn.rollback()
+        raise
+
+
+@contextlib.asynccontextmanager
+async def ingest_transaction():
+    """A refused event raises before anything is written, so a half-written
+    event cannot happen."""
+    writes = _PendingWrites()
+    yield writes
+    if writes.statements:
+        _apply_writes(writes.statements)
+
+
+@app.on_event("shutdown")
+async def close_ingest_db():
+    global _ingest_conn
+    if _ingest_conn is not None:
+        with contextlib.suppress(Exception):
+            _ingest_conn.close()
+        _ingest_conn = None
+
+
 @app.post("/api/log-update")
 async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_ingestion_token)):
     watcher_id = clean_source_id(payload.watcher_id)
@@ -755,7 +916,7 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
         if event_time is not None:
             _, _, rest = rest.partition(",")
 
-        async with aiosqlite.connect(DB_FILE) as db:
+        async with ingest_transaction() as db:
             if log_type == "ZONE":
                 zone_name = rest.strip()
                 if len(zone_name) > ZONE_MAX_LENGTH:
@@ -1036,14 +1197,19 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
             await db.commit()
 
         # Broadcast the data out live to viewers
-        await manager.broadcast({
-            "event": "PLAYER_UPDATE",
-            "player": player_name,
-            "state": public_state(player_states[player_name]),
-        })
+        await broadcast_player(player_name)
 
         await broadcast_traffic(record_traffic(True, payload.data, None, watcher_id, account_id))
         return {"status": "success"}
+    except sqlite3.OperationalError as e:
+        # The database was busy or briefly unavailable. That says nothing
+        # about the event, so it must not be answered as a refusal: a watcher
+        # skips a refused event for good. 503 makes it keep the event and try
+        # again on its next poll -- which every watcher version already does.
+        logger.warning("Database unavailable for log-update (%s); asked the watcher to retry", e)
+        await broadcast_traffic(record_traffic(
+            False, payload.data, f"Database busy -- watcher will retry ({e})", watcher_id, account_id))
+        return JSONResponse({"status": "retry", "detail": "Database busy, try again"}, status_code=503)
     except Exception as e:
         logger.exception("Failed to process log-update payload: %r", payload.data)
         # Refusals matter more than acceptances here. A rejected event is gone
@@ -1051,6 +1217,19 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
         # this is the only place it is ever visible as it happens.
         await broadcast_traffic(record_traffic(False, payload.data, str(e), watcher_id, account_id))
         return {"status": "error", "detail": str(e)}
+
+async def broadcast_player(name: str):
+    """Tells every open dashboard about a character's new state -- unless it
+    is hidden, in which case nothing is sent at all. Every live update goes
+    through here, so a hidden character cannot leak out of some other path."""
+    if not is_public(name):
+        return
+    await manager.broadcast({
+        "event": "PLAYER_UPDATE",
+        "player": name,
+        "state": public_state(player_states[name]),
+    })
+
 
 # --- OPERATOR-CURATED ROSTER METADATA ---
 # Streaming links and tags aren't something the game can tell us — they're
@@ -1084,12 +1263,58 @@ async def update_roster_meta(player_name: str, payload: RosterMetaPayload, _user
               datetime.now().isoformat()))
         await db.commit()
 
-    await manager.broadcast({
-        "event": "PLAYER_UPDATE",
-        "player": player_name,
-        "state": public_state(state),
-    })
+    await broadcast_player(player_name)
     return {"status": "success", "state": public_state(state)}
+
+
+async def _set_hidden(player_name: str, hidden: bool) -> dict:
+    if player_name not in player_states:
+        # Only characters the dashboard has seen: a typo'd name would be
+        # "hidden" with nothing to show for it, and look like it worked.
+        raise HTTPException(status_code=404, detail=f"No character called {player_name!r}")
+    hidden_at = datetime.now(timezone.utc).isoformat() if hidden else None
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("""
+            INSERT INTO player_roster_meta (player, hidden_at, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(player) DO UPDATE SET hidden_at=excluded.hidden_at, updated_at=excluded.updated_at
+        """, (player_name, hidden_at, datetime.now().isoformat()))
+        await db.commit()
+    if hidden:
+        hidden_players.add(player_name)
+        # Open dashboards drop it now rather than at their next reload -- the
+        # point is that it comes off the big screen while people are looking.
+        await manager.broadcast({"event": "PLAYER_REMOVED", "player": player_name})
+    else:
+        hidden_players.discard(player_name)
+        await broadcast_player(player_name)
+    return {"status": "success", "player": player_name, "hidden": hidden, "hidden_at": hidden_at}
+
+
+@app.post("/api/roster/{player_name}/hide")
+async def hide_player(player_name: str, _user: str = Depends(require_operator)):
+    return await _set_hidden(player_name, True)
+
+
+@app.post("/api/roster/{player_name}/unhide")
+async def unhide_player(player_name: str, _user: str = Depends(require_operator)):
+    return await _set_hidden(player_name, False)
+
+
+@app.get("/api/roster/hidden")
+async def list_hidden(_user: str = Depends(require_operator)):
+    """The hidden characters, for the roster page. That page otherwise reads
+    the public feed, which never carries them -- so without this, hiding a
+    character would also remove the only way to bring it back."""
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT player, hidden_at FROM player_roster_meta WHERE hidden_at IS NOT NULL ORDER BY hidden_at DESC")
+        rows = await cursor.fetchall()
+    return {"hidden": [
+        {"name": r["player"], "hidden_at": r["hidden_at"],
+         **public_state(player_states.get(r["player"], default_state()))}
+        for r in rows
+    ]}
 
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1354,23 +1579,36 @@ async def get_analytics(_user: str = Depends(require_viewer)):
     this ever gets slow, cache it per DB write rather than sampling."""
     async with aiosqlite.connect(DB_FILE) as db:
         db.row_factory = aiosqlite.Row
+        # Every query below reads visible_history, never xp_history directly:
+        # hidden characters are left out once, here, rather than by a filter on
+        # each query that the next query added would be free to forget. TEMP,
+        # so it lives and dies with this one connection.
+        #
+        # The names go in through a temp table: SQLite does not allow ?
+        # parameters inside CREATE VIEW, and pasting names into SQL text is
+        # how injection happens -- these are names anyone can choose.
+        await db.execute("CREATE TEMP TABLE hidden_names (player TEXT PRIMARY KEY)")
+        await db.executemany("INSERT INTO temp.hidden_names VALUES (?)", [(n,) for n in hidden_players])
+        await db.execute(
+            "CREATE TEMP VIEW visible_history AS SELECT * FROM xp_history"
+            " WHERE player NOT IN (SELECT player FROM temp.hidden_names)")
         async with db.execute(
-            "SELECT player, level, current_xp, max_xp FROM xp_history WHERE log_type='XP' ORDER BY id"
+            "SELECT player, level, current_xp, max_xp FROM visible_history WHERE log_type='XP' ORDER BY id"
         ) as cursor:
             xp_rows = await cursor.fetchall()
         async with db.execute(
-            "SELECT player, xp_reward FROM xp_history WHERE log_type='QUEST' AND xp_reward IS NOT NULL"
+            "SELECT player, xp_reward FROM visible_history WHERE log_type='QUEST' AND xp_reward IS NOT NULL"
         ) as cursor:
             quest_rows = await cursor.fetchall()
         # The XP each level costs is a game constant, so any player who has
         # been through a level tells us its price.
         async with db.execute(
-            "SELECT level, MAX(max_xp) AS cost FROM xp_history"
+            "SELECT level, MAX(max_xp) AS cost FROM visible_history"
             " WHERE log_type='XP' AND max_xp > 1 GROUP BY level ORDER BY level"
         ) as cursor:
             level_rows = await cursor.fetchall()
         async with db.execute(
-            "SELECT player, level, event_time FROM xp_history"
+            "SELECT player, level, event_time FROM visible_history"
             " WHERE log_type='XP' AND event_time IS NOT NULL ORDER BY event_time"
         ) as cursor:
             timed_rows = await cursor.fetchall()
@@ -1383,7 +1621,7 @@ async def get_analytics(_user: str = Depends(require_viewer)):
         # -- and the addon requests one on every PLAYER_LEVEL_UP, so there is a
         # sample at each transition rather than only at login.
         async with db.execute(
-            "SELECT player, level, played_total, event_time FROM xp_history"
+            "SELECT player, level, played_total, event_time FROM visible_history"
             " WHERE log_type='STATUS' AND event_time IS NOT NULL"
             " AND played_total IS NOT NULL ORDER BY event_time"
         ) as cursor:
@@ -1394,18 +1632,18 @@ async def get_analytics(_user: str = Depends(require_viewer)):
         # the zone column existed -- hence the separate count, so the page can
         # say so rather than quietly under-reporting.
         async with db.execute(
-            "SELECT level, COUNT(*) AS n FROM xp_history"
+            "SELECT level, COUNT(*) AS n FROM visible_history"
             " WHERE log_type='DEATH' GROUP BY level ORDER BY level"
         ) as cursor:
             deaths_by_level = [{"level": r["level"], "deaths": r["n"]} for r in await cursor.fetchall()]
         async with db.execute(
-            "SELECT zone, COUNT(*) AS n FROM xp_history"
+            "SELECT zone, COUNT(*) AS n FROM visible_history"
             " WHERE log_type='DEATH' AND zone IS NOT NULL AND zone != ''"
             " GROUP BY zone ORDER BY n DESC, zone"
         ) as cursor:
             deaths_by_zone = [{"zone": r["zone"], "deaths": r["n"]} for r in await cursor.fetchall()]
         async with db.execute(
-            "SELECT COUNT(*) AS n FROM xp_history WHERE log_type='DEATH' AND (zone IS NULL OR zone = '')"
+            "SELECT COUNT(*) AS n FROM visible_history WHERE log_type='DEATH' AND (zone IS NULL OR zone = '')"
         ) as cursor:
             deaths_without_zone = (await cursor.fetchone())["n"]
         # Everything that happened, bucketed by the hour it happened in.
@@ -1414,14 +1652,14 @@ async def get_analytics(_user: str = Depends(require_viewer)):
         # this person playing", not "was this person levelling".
         async with db.execute(
             "SELECT player, substr(event_time, 1, 13) AS hour, COUNT(*) AS n"
-            " FROM xp_history WHERE event_time IS NOT NULL"
+            " FROM visible_history WHERE event_time IS NOT NULL"
             " GROUP BY player, hour ORDER BY hour"
         ) as cursor:
             activity_rows = await cursor.fetchall()
-        async with db.execute("SELECT COUNT(*) AS n FROM xp_history") as cursor:
+        async with db.execute("SELECT COUNT(*) AS n FROM visible_history") as cursor:
             history_total = (await cursor.fetchone())["n"]
         async with db.execute(
-            "SELECT player, COUNT(*) AS deaths FROM xp_history WHERE log_type='DEATH' GROUP BY player"
+            "SELECT player, COUNT(*) AS deaths FROM visible_history WHERE log_type='DEATH' GROUP BY player"
         ) as cursor:
             death_rows = await cursor.fetchall()
     deaths = {row["player"]: row["deaths"] for row in death_rows}
@@ -1445,6 +1683,8 @@ async def get_analytics(_user: str = Depends(require_viewer)):
 
     players = []
     for name, state in player_states.items():
+        if not is_public(name):
+            continue
         total = gained.get(name, 0)
         quests_xp = quest_xp.get(name, 0)
         players.append({
@@ -1920,7 +2160,7 @@ async def get_leaderboard(sort_by: str = Query("level"), search: str = Query(Non
     players = [
         {"name": name, **public_state(stats)}
         for name, stats in player_states.items()
-        if not search or search.lower() in name.lower()
+        if is_public(name) and (not search or search.lower() in name.lower())
     ]
     players.sort(
         key=lambda x: (x["level"], x["pct"]) if sort_by == "level" else x["name"].lower(),
@@ -1930,16 +2170,17 @@ async def get_leaderboard(sort_by: str = Query("level"), search: str = Query(Non
 
 @app.websocket("/ws/dashboard")
 async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+    await manager.connect(websocket, first_message={
+        "event": "INIT",
+        "data": {name: public_state(state) for name, state in player_states.items() if is_public(name)},
+        "stale_after_seconds": STALE_AFTER_SECONDS,
+    })
     try:
-        await websocket.send_json({
-            "event": "INIT",
-            "data": {name: public_state(state) for name, state in player_states.items()},
-            "stale_after_seconds": STALE_AFTER_SECONDS,
-        })
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception:  # noqa: BLE001 -- however it ended, stop sending to it
         manager.disconnect(websocket)
 
 if __name__ == "__main__":

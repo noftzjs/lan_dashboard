@@ -67,11 +67,13 @@ Players only need the `/setup` page. It walks them through installing the addon 
 Rebuild whenever `savedvars_watcher.py` changes. The server serves whatever file is in `downloads/` and can't build it itself: PyInstaller only targets the OS it runs on, and the server runs Linux.
 
 ```bash
-pip install -r requirements-watcher.txt
-pyinstaller --onefile --noconsole --name savedvars_watcher --distpath downloads --workpath build --specpath build savedvars_watcher.py
+.venv\Scripts\python.exe -m pip install -r requirements-watcher.txt
+.venv\Scripts\python.exe -m PyInstaller --onefile --noconsole --name savedvars_watcher --distpath downloads --workpath build --specpath build savedvars_watcher.py
 ```
 
-`downloads/` is git-ignored (the `.exe` is ~14 MB). `/setup` shows the file's build date and SHA-256, so a stale upload is easy to spot.
+Build with the project's `.venv` Python, as above, not a bare `pyinstaller`. PyInstaller bundles every package the building Python has that the watcher's imports can reach, so a global Python with numpy installed produced a 31 MB `.exe` instead of ~17 MB. The watcher never uses numpy; Pillow merely offers it as an option.
+
+`downloads/` is git-ignored (the `.exe` is ~17 MB). `/setup` shows the file's build date and SHA-256, so a stale upload is easy to spot.
 
 ## Tests and lint
 
@@ -87,7 +89,7 @@ The suite stubs out `load_dotenv`, so results never depend on your own `.env`, a
 
 The repo builds with the included `Dockerfile`. In Coolify: **Build Pack: Dockerfile**, **Ports Exposes: `5000`**, domain as `https://<domain>`, health check off (the slim image has no curl).
 
-1. **Persistent volume at `/app/data`** and `DB_FILE=/app/data/lan_progression.db`. Without it, every redeploy silently wipes all progression data.
+1. **Persistent volume at `/app/data`** and `DB_FILE=/app/data/lan_progression.db`. Without it, every redeploy silently wipes all progression data. The database runs in WAL mode, so it has two companion files (`-wal`, `-shm`) beside it: back up all three together, or stop the app first.
 2. **Environment variables in Coolify's UI**, never a committed `.env`: at minimum `ROSTER_PASSWORD`, `DB_FILE` and `INGESTION_TOKEN`; usually `DOWNLOAD_PASSPHRASE` and `PUBLIC_URL` too.
 3. **Second mount at `/app/downloads`** holding `savedvars_watcher.exe` (exactly that name), uploaded over SFTP/SCP. Replacing that file updates the download with no redeploy. Until it's there, `/setup` greys out the watcher button.
 

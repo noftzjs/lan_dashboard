@@ -165,6 +165,15 @@
             visibility: hidden;
         }
         .row-unsaved .unsaved-dot { visibility: visible; }
+        /* Secondary to Save: hiding is reversible, but it should not look like
+           the row's main action. */
+        .btn-quiet { background-color: transparent; color: var(--text-muted); border: 1px solid var(--border-color); margin-left: 6px; }
+        .btn-quiet:hover { color: var(--text-color); border-color: var(--text-muted); }
+        .hidden-section { margin-top: 20px; border-top: 1px solid var(--border-color); padding-top: 14px; }
+        .hidden-section h3 { font-size: 13px; font-weight: 600; margin: 0 0 4px; }
+        .hidden-section p { color: var(--text-muted); font-size: 12.5px; margin: 0 0 10px; }
+        #hiddenList table { min-width: 0; }
+        #hiddenList td { color: var(--text-muted); }
         .save-status { font-size: 11px; color: var(--text-muted); margin-left: 8px; white-space: nowrap; }
     </style>
 </head>
@@ -278,6 +287,11 @@
             </tbody>
         </table>
     </div>
+    <section class="hidden-section" id="hiddenSection" hidden>
+        <h3>Hidden from the dashboard</h3>
+        <p>Not shown on the dashboard, big screen or analytics. Their events are still recorded, so unhiding brings everything back.</p>
+        <div class="table-wrap" id="hiddenList"></div>
+    </section>
     </div>
 
     </div>
@@ -732,6 +746,8 @@
                 </td>
                 <td style="white-space:nowrap;">
                     <button class="btn btn-save" data-action="save" data-name="${safeName}" ${dirty ? "" : "disabled"}>Save</button>
+                    <button class="btn btn-quiet" data-action="hide" data-name="${safeName}"
+                            title="Take this character off the dashboard, big screen and analytics. Reversible.">Hide</button>
                     <span class="save-status">${status ? escapeHtml(status) : ""}</span>
                 </td>
             </tr>
@@ -763,7 +779,57 @@
     rosterBody.addEventListener("click", (e) => {
         const btn = e.target.closest('[data-action="save"]');
         if (btn) saveRow(btn.dataset.name);
+        const hide = e.target.closest('[data-action="hide"]');
+        if (hide) setHidden(hide.dataset.name, true);
     });
+
+    // --- hidden characters -------------------------------------------------
+    // The live feed never carries a hidden character, so the list comes from
+    // an operator-only endpoint instead -- otherwise hiding someone would also
+    // remove the only button that brings them back.
+    async function loadHidden() {
+        const section = document.getElementById("hiddenSection");
+        let hidden;
+        try {
+            const response = await fetch("/api/roster/hidden");
+            if (!response.ok) throw new Error(response.status);
+            hidden = (await response.json()).hidden;
+        } catch (e) {
+            return;          // not an operator, or offline: nothing to show
+        }
+        section.hidden = !hidden.length;
+        if (!hidden.length) return;
+        const since = iso => new Date(iso).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
+        document.getElementById("hiddenList").innerHTML = `
+            <table>
+              <thead><tr><th>Name</th><th>Lvl</th><th>Class</th><th>Hidden since</th><th></th></tr></thead>
+              <tbody>${hidden.map(p => `
+                <tr>
+                    <td class="name-cell">${escapeHtml(p.name)}</td>
+                    <td class="level-cell">${p.level}</td>
+                    <td>${escapeHtml(p.class || "—")}</td>
+                    <td>${since(p.hidden_at)}</td>
+                    <td><button class="btn btn-save" data-action="unhide" data-name="${escapeHtml(p.name)}">Unhide</button></td>
+                </tr>`).join("")}</tbody>
+            </table>`;
+    }
+
+    async function setHidden(name, hide) {
+        const response = await fetch(`/api/roster/${encodeURIComponent(name)}/${hide ? "hide" : "unhide"}`, { method: "POST" });
+        if (!response.ok) {
+            alert(`Couldn't ${hide ? "hide" : "unhide"} ${name} (${response.status}).`);
+            return;
+        }
+        // The socket also says so, but this page should not wait on it.
+        if (hide) { delete playerData[name]; renderRoster(); }
+        loadHidden();
+    }
+
+    document.getElementById("hiddenList").addEventListener("click", (e) => {
+        const btn = e.target.closest('[data-action="unhide"]');
+        if (btn) setHidden(btn.dataset.name, false);
+    });
+    loadHidden();
     rosterBody.addEventListener("input", (e) => {
         const field = e.target.closest("[data-field]");
         if (!field) return;
