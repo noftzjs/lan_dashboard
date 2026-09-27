@@ -11,6 +11,7 @@ savedvars_watcher_backup.csv
 savedvars_watcher_errors.log
 .savedvars_watcher_state.json
 .savedvars_watcher_id
+.savedvars_watcher_startup
 savedvars_watcher_config.json
 
 # Machine-specific SavedVariables sample/export, not source

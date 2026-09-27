@@ -86,6 +86,10 @@ STATE_PATH = os.path.join(SCRIPT_DIR, ".savedvars_watcher_state.json")
 # the state file is the one someone deletes to "reset" the watcher, and that
 # should not also make this PC look like a different person to the server.
 WATCHER_ID_PATH = os.path.join(SCRIPT_DIR, ".savedvars_watcher_id")
+# Present once "start with Windows" has been decided for this install, by the
+# first-run default or by the player's own toggle -- so the default is applied
+# exactly once and never overrides someone who turned it off.
+STARTUP_DECIDED_PATH = os.path.join(SCRIPT_DIR, ".savedvars_watcher_startup")
 BACKUP_CSV = os.path.join(SCRIPT_DIR, "savedvars_watcher_backup.csv")
 ERROR_LOG = os.path.join(SCRIPT_DIR, "savedvars_watcher_errors.log")
 # Everything the watcher says, not just errors — the only place to read it
@@ -439,7 +443,14 @@ class AuthFailed(Exception):
     and retried once the token is fixed — not skipped."""
 
 
-def send_packet(server_url, payload, ingestion_token=None, timeout=2.0, source=None):
+# 10 s, not the 2 s it was. Load testing the real server had a burst of all 50
+# players syncing at once reach 2.4 s -- and a watcher that gives up re-sends
+# an event the server may already have saved, counting it twice. Waiting a
+# little longer in a rare burst is the better failure.
+SEND_TIMEOUT_SECONDS = 10.0
+
+
+def send_packet(server_url, payload, ingestion_token=None, timeout=SEND_TIMEOUT_SECONDS, source=None):
     body = {"timestamp": datetime.now().isoformat(), "data": payload}
     # watcher_id / account_id. Extra body fields are ignored by a server
     # older than this, so a new watcher is safe against an old deployment.
@@ -725,6 +736,31 @@ def startup_enabled():
         return False
 
 
+def mark_startup_decided():
+    with contextlib.suppress(OSError), open(STARTUP_DECIDED_PATH, "w", encoding="utf-8") as f:
+        f.write(datetime.now().isoformat())
+
+
+def apply_startup_default():
+    """Turns "start with Windows" on, the first time the packaged watcher runs.
+
+    People forget to relaunch the watcher after a reboot, and a watcher that
+    isn't running looks exactly like one that is broken. So it starts with
+    Windows unless the player says otherwise -- opt-out, from the tray menu.
+
+    Only ever once per install (the marker file), so turning it off sticks.
+    Only for the frozen .exe: a run from source would register the Python
+    interpreter, which is no use to anyone. Returns True if it was turned on.
+    """
+    if os.name != "nt" or not getattr(sys, "frozen", False):
+        return False
+    if os.path.exists(STARTUP_DECIDED_PATH):
+        return False
+    turned_on = set_startup(True)
+    mark_startup_decided()
+    return turned_on
+
+
 def set_startup(enabled):
     """Returns True if the registry now matches what was asked for."""
     if os.name != "nt":
@@ -838,6 +874,7 @@ class TrayUI:
 
     def _toggle_startup(self, *_pystray_args):
         wanted = not startup_enabled()
+        mark_startup_decided()          # the player's choice, from now on
         if set_startup(wanted):
             say(f"Start with Windows turned {'on' if wanted else 'off'}.")
         else:
@@ -914,7 +951,17 @@ def run_tray(config, args):
 
     TRAY.on_path_chosen = remember_choice
     say("Started in the system tray.")
-    TRAY.run(lambda: watch(config, stop_event, chosen_path), run_seconds=args.run_seconds)
+
+    def work():
+        # Inside the worker, not before it: the icon has to be up for the
+        # notification to have anywhere to appear.
+        if apply_startup_default():
+            say("Set to start with Windows (first run). Turn it off from the tray icon's menu.")
+            notify("The watcher will now start with Windows, so it's running whenever you play. "
+                   "Turn this off from the tray icon's menu.")
+        watch(config, stop_event, chosen_path)
+
+    TRAY.run(work, run_seconds=args.run_seconds)
 
 
 def trim_log():
