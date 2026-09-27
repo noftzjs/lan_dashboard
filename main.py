@@ -128,6 +128,27 @@ hidden_players: set[str] = set()
 def is_public(name: str) -> bool:
     return name not in hidden_players
 
+
+# Which characters each watcher install and WoW account has sent, mirrored
+# from character_sources so an event can be checked against them without a
+# database read. Loaded at startup, kept current as events are accepted.
+characters_by_watcher: dict[str, set[str]] = {}
+characters_by_account: dict[str, set[str]] = {}
+linked_characters: set[str] = set()      # seen with at least one id
+
+# Added once, to a character that first appears from an install or account
+# that has already sent a different character: the first one seen is the main.
+# Once only -- whatever the operator does with the tag afterwards stands.
+ALT_TAG = "alt"
+
+
+def remember_link(player: str, watcher_id: str | None, account_id: str | None):
+    linked_characters.add(player)
+    if watcher_id:
+        characters_by_watcher.setdefault(watcher_id, set()).add(player)
+    if account_id:
+        characters_by_account.setdefault(account_id, set()).add(player)
+
 def idle_seconds(state: dict[str, Any]) -> float | None:
     """Seconds since this character's last accepted event, or None if the
     server has never seen one (treated as stale by the client)."""
@@ -603,6 +624,10 @@ async def reload_states_from_db():
                 state["tags"] = json.loads(row["tags"]) if row["tags"] else []
                 if row["hidden_at"]:
                     hidden_players.add(row["player"])
+
+        async with db.execute("SELECT player, watcher_id, account_id FROM character_sources") as cursor:
+            for row in await cursor.fetchall():
+                remember_link(row["player"], row["watcher_id"] or None, row["account_id"] or None)
 
 # --- WEBSOCKET CONNECTION MANAGER ---
 class ConnectionManager:
@@ -1185,6 +1210,21 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
 
             # Only for events that were accepted: a refused payload can name
             # any character, and linking on it would let a typo claim one.
+            # First time this character is seen with an id: is it an alt?
+            # Decided here, from the in-memory index, but only applied below
+            # once the event is saved, so a failed write leaves no stray tag.
+            new_tags = None
+            if (watcher_id or account_id) and player_name not in linked_characters:
+                siblings = (characters_by_watcher.get(watcher_id, set())
+                            | characters_by_account.get(account_id, set())) - {player_name}
+                tags = state.get("tags") or []
+                if siblings and ALT_TAG not in {t.lower() for t in tags} and len(tags) < TAGS_MAX_COUNT:
+                    new_tags = [*tags, ALT_TAG]
+                    await db.execute("""
+                        INSERT INTO player_roster_meta (player, tags, updated_at) VALUES (?, ?, ?)
+                        ON CONFLICT(player) DO UPDATE SET tags=excluded.tags, updated_at=excluded.updated_at
+                    """, (player_name, json.dumps(new_tags), datetime.now().isoformat()))
+
             if watcher_id or account_id:
                 await db.execute("""
                     INSERT INTO character_sources (player, watcher_id, account_id, first_seen, last_seen, events)
@@ -1195,6 +1235,12 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                       state["last_activity"], state["last_activity"]))
 
             await db.commit()
+
+        # Saved: now the in-memory copies can follow.
+        if watcher_id or account_id:
+            remember_link(player_name, watcher_id, account_id)
+        if new_tags is not None:
+            player_states[player_name]["tags"] = new_tags
 
         # Broadcast the data out live to viewers
         await broadcast_player(player_name)
@@ -1685,8 +1731,13 @@ async def get_analytics(_user: str = Depends(require_viewer)):
     for name, state in player_states.items():
         if not is_public(name):
             continue
-        total = gained.get(name, 0)
         quests_xp = quest_xp.get(name, 0)
+        # Quest XP is part of total XP, so it can never be more -- but the two
+        # are counted from different events, and if XP events were missed (an
+        # older addon, a gap in syncing) the quest rewards alone can outrun
+        # what was seen. The total is then at least what the quests paid, or
+        # the page shows "195% quests" on a bar that overflows its panel.
+        total = max(gained.get(name, 0), quests_xp)
         players.append({
             "name": name,
             "class": state.get("class"),

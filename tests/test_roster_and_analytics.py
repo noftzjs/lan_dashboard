@@ -167,3 +167,17 @@ def test_a_capped_character_is_visible_to_the_analytics_page(server):
     player = next(p for p in analytics(server)["players"] if p["name"] == "Capped")
     assert player["max_xp"] == 0          # what the page keys off to say "MAX"
     assert player["level"] == 20
+
+
+def test_quest_xp_never_exceeds_total_xp(build_server):
+    """Quest XP is part of total XP. They are counted from different events,
+    so when XP events are missed the quest rewards alone can outrun them --
+    which drew a "195% quests" bar that overflowed its panel."""
+    _, client = build_server()
+    accepted(client, "Ayla,XP,1790000000,10,100,1000")
+    accepted(client, "Ayla,QUEST,1790000060,123,2400")       # no XP event followed it
+
+    (ayla,) = [p for p in client.get("/api/analytics", auth=ROSTER_AUTH).json()["players"] if p["name"] == "Ayla"]
+    assert ayla["quest_xp"] == 2400
+    assert ayla["total_xp"] >= ayla["quest_xp"]
+    assert ayla["other_xp"] == ayla["total_xp"] - ayla["quest_xp"]

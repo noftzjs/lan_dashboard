@@ -190,6 +190,11 @@
         .big-row .stream-badge { width: 22px; height: 22px; }
 
         .empty-state { text-align: center; padding: 40px 10px; color: var(--text-muted); }
+        .ladder-pager { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between;
+                        margin-top: 12px; font-size: 13px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+        .ladder-pager .pages { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+        .ladder-pager label { display: flex; align-items: center; gap: 6px; }
+        .ladder-pager button:disabled { opacity: 0.4; cursor: default; }
 
         @media (max-width: 560px) {
             .hero .right { margin-left: 0; text-align: left; }
@@ -217,25 +222,25 @@
     </header>
 
     <div class="controls">
-        <input class="grow" type="text" id="searchBar" placeholder="Search character name..." oninput="renderDashboard()">
-        <select id="guildFilter" onchange="renderDashboard()">
+        <input class="grow" type="text" id="searchBar" placeholder="Search character name..." oninput="filtersChanged()">
+        <select id="guildFilter" onchange="filtersChanged()">
             <option value="">All Guilds</option>
             <!-- Populated from currently-present guilds at render time, see below -->
         </select>
-        <select id="factionFilter" onchange="renderDashboard()">
+        <select id="factionFilter" onchange="filtersChanged()">
             <option value="">All Factions</option>
             <option value="Alliance">Alliance</option>
             <option value="Horde">Horde</option>
         </select>
-        <select id="classFilter" onchange="renderDashboard()">
+        <select id="classFilter" onchange="filtersChanged()">
             <option value="">All Classes</option>
             <!-- Populated from CLASS_COLORS at load, see below -->
         </select>
-        <select id="activityFilter" onchange="renderDashboard()">
+        <select id="activityFilter" onchange="filtersChanged()">
             <option value="active">Active only</option>
             <option value="all">Show all</option>
         </select>
-        <select id="sortBy" onchange="renderDashboard()">
+        <select id="sortBy" onchange="filtersChanged()">
             <option value="level">Sort by Level</option>
             <option value="name">Sort Alphabetically</option>
         </select>
@@ -283,6 +288,21 @@
                 </thead>
                 <tbody id="ladderBody"></tbody>
             </table>
+        </div>
+        <div class="ladder-pager" id="ladderPager" hidden>
+            <span id="ladderRange"></span>
+            <span class="pages">
+                <label>Per page
+                    <select id="ladderPageSize">
+                        <option value="25">25</option>
+                        <option value="50">50</option>
+                        <option value="0">All</option>
+                    </select>
+                </label>
+                <button type="button" class="nav-link" id="ladderPrev">&lsaquo; Prev</button>
+                <span id="ladderPageOf"></span>
+                <button type="button" class="nav-link" id="ladderNext">Next &rsaquo;</button>
+            </span>
         </div>
     </section>
 
@@ -541,9 +561,26 @@
             const body = document.getElementById("ladderBody");
             if (!players.length) {
                 body.innerHTML = `<tr><td colspan="10" class="empty-state">${emptyMessage}</td></tr>`;
+                document.getElementById("ladderPager").hidden = true;
                 return;
             }
-            morphChildren(body, players.map((p, i) => buildLadderRow(p, i + 1, ranked)).join(""));
+            // One page at a time, so fifty-odd characters don't make the page
+            // endless. Ranks carry on across pages: page 2 starts at 26.
+            const pageSize = Number(document.getElementById("ladderPageSize").value) || players.length;
+            const pages = Math.max(1, Math.ceil(players.length / pageSize));
+            ladderPage = Math.min(ladderPage, pages - 1);      // the list can shrink under us
+            const start = ladderPage * pageSize;
+            const pageRows = players.slice(start, start + pageSize);
+            morphChildren(body, pageRows.map((p, i) => buildLadderRow(p, start + i + 1, ranked)).join(""));
+
+            // Shown once there is more than the smallest page, so choosing
+            // "All" never hides the control that would switch it back.
+            document.getElementById("ladderPager").hidden = players.length <= 25;
+            document.getElementById("ladderRange").textContent =
+                `${start + 1}–${start + pageRows.length} of ${players.length}`;
+            document.getElementById("ladderPageOf").textContent = `Page ${ladderPage + 1} of ${pages}`;
+            document.getElementById("ladderPrev").disabled = ladderPage === 0;
+            document.getElementById("ladderNext").disabled = ladderPage >= pages - 1;
             return;
         }
 
@@ -564,6 +601,28 @@
         packLabel.hidden = !featured || !rest.length;
         morphChildren(rowsHost, rest.map((p, i) => buildBigRow(p, ranked ? i + 2 : i + 1)).join(""));
     }
+
+    // --- ladder paging -------------------------------------------------------
+    // Live updates keep you on your page -- someone levelling should not throw
+    // you back to page 1. Changing what is shown does go back, since page 3 of
+    // the old results means nothing once the results are different.
+    let ladderPage = 0;
+    function filtersChanged() {
+        ladderPage = 0;
+        renderDashboard();
+    }
+
+    const pageSizeSelect = document.getElementById("ladderPageSize");
+    try {
+        const saved = localStorage.getItem("ladderPageSize");
+        if (saved && [...pageSizeSelect.options].some(o => o.value === saved)) pageSizeSelect.value = saved;
+    } catch (e) { /* private mode */ }
+    pageSizeSelect.addEventListener("change", () => {
+        try { localStorage.setItem("ladderPageSize", pageSizeSelect.value); } catch (e) { /* ignore */ }
+        filtersChanged();
+    });
+    document.getElementById("ladderPrev").addEventListener("click", () => { ladderPage--; renderDashboard(); });
+    document.getElementById("ladderNext").addEventListener("click", () => { ladderPage++; renderDashboard(); });
 
     setView(viewMode);
     connectWebSocket(renderDashboard);
