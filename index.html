@@ -102,7 +102,9 @@
            neighbours. flex-shrink is proportional to content, so a long tag
            gives up room before a short one does. The floor keeps the shortest
            chip readable; three at the floor still fit the column. */
-        .tag-cell .tag-chip { flex: 0 1 auto; min-width: 42px; max-width: 100%; }
+        .tag-cell .tag-chip { flex: 0 1 auto; min-width: 42px; max-width: 100%; text-align: center; }
+        /* Centred: a short tag ("alt" is 12px of text) is widened to the floor,
+           and left-aligned that read as a pill with a gap stuck on its end. */
         .idle-row td { opacity: 0.62; }
 
         /* ---------------- Big screen ---------------- */

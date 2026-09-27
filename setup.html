@@ -379,7 +379,7 @@
             const response = await fetch("/api/watcher-bundle", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ passphrase: document.getElementById("passphraseInput").value }),
+                body: JSON.stringify({ passphrase: document.getElementById("passphraseInput").value, link: true }),
             });
             if (!response.ok) {
                 let detail = "Something went wrong. Try again.";
@@ -387,9 +387,15 @@
                 message.textContent = detail;
                 return;
             }
-            saveBlob(await response.blob(), "LanDashboardWatcher.zip");
+            // The server checked the passphrase and handed back a one-time
+            // link. Letting the browser fetch it, rather than fetching the zip
+            // here, is what gives it a real download with a progress bar --
+            // this used to sit on "Preparing..." for the whole transfer.
+            const { url } = await response.json();
+            location.assign(url);
             message.className = "ok";
-            message.textContent = "Downloaded LanDashboardWatcher.zip — unzip it, then start the watcher after your first sync (step 3).";
+            message.textContent = "Downloading LanDashboardWatcher.zip — your browser shows the progress. "
+                + "Once it's done, unzip it, then start the watcher after your first sync (step 3).";
         } catch (e) {
             message.textContent = "Couldn't reach the server. Check your connection and try again.";
         } finally {

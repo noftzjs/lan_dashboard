@@ -182,3 +182,69 @@ def test_setup_info_advertises_what_the_page_needs_to_know(build_server):
     assert info["passphrase_required"] is True
     assert info["ingestion_token_required"] is True
     assert info["addon"]["version"]            # read from the .toc
+
+
+# --- one-time download links ------------------------------------------------
+# The setup page used to fetch the whole zip in JavaScript before handing it
+# over, so the browser showed no download and no progress for the entire
+# transfer. It now asks for a one-time link and lets the browser download it.
+
+@pytest.fixture
+def bundle_server(build_server, monkeypatch, tmp_path):
+    module, client = build_server(DOWNLOAD_PASSPHRASE=PASSPHRASE, INGESTION_TOKEN="s3cret",
+                                  PUBLIC_URL="https://4l.example.net")
+    fake_exe = tmp_path / "savedvars_watcher.exe"
+    fake_exe.write_bytes(b"MZ fake binary")
+    monkeypatch.setattr(module, "WATCHER_EXE", str(fake_exe))
+    return module, client
+
+
+def link_for(client, passphrase=PASSPHRASE):
+    return client.post("/api/watcher-bundle", json={"passphrase": passphrase, "link": True})
+
+
+def test_the_link_downloads_the_same_bundle(bundle_server):
+    _module, client = bundle_server
+    response = link_for(client)
+    assert response.status_code == 200
+    url = response.json()["url"]
+    assert PASSPHRASE.split()[0] not in url, "the passphrase must never be in a URL"
+
+    download = client.get(url)
+    assert download.status_code == 200
+    assert download.headers["content-disposition"].startswith("attachment")
+    config = json.loads(zipfile.ZipFile(io.BytesIO(download.content)).read("savedvars_watcher_config.json"))
+    assert config["ingestion_token"] == "s3cret"
+
+
+def test_a_link_works_once(bundle_server):
+    """A link that leaks -- browser history, a proxy log -- is already dead."""
+    _module, client = bundle_server
+    url = link_for(client).json()["url"]
+    assert client.get(url).status_code == 200
+    second = client.get(url)
+    assert second.status_code == 410
+    assert b"s3cret" not in second.content
+
+
+def test_a_link_expires(bundle_server, monkeypatch):
+    module, client = bundle_server
+    monkeypatch.setattr(module, "BUNDLE_LINK_SECONDS", -1)
+    url = link_for(client).json()["url"]
+    assert client.get(url).status_code == 410
+
+
+def test_a_made_up_link_gets_nothing(bundle_server):
+    _module, client = bundle_server
+    response = client.get("/api/watcher-bundle/not-a-real-token")
+    assert response.status_code == 410
+    assert b"s3cret" not in response.content
+
+
+def test_no_link_without_the_passphrase(bundle_server):
+    """The link is worth exactly what the passphrase is; it must not be
+    obtainable without it -- and wrong guesses still count toward lockout."""
+    _module, client = bundle_server
+    response = link_for(client, "wrong")
+    assert response.status_code == 401
+    assert "url" not in response.text

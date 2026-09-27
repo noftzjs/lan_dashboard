@@ -23,7 +23,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Web
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -1549,20 +1549,25 @@ dashboard's address and access token, so don't post it anywhere public.
 
 class BundleRequest(BaseModel):
     passphrase: str
+    # True: answer with a one-time link instead of the zip itself (see below).
+    link: bool = False
 
 
-@app.post("/api/watcher-bundle")
-def download_watcher_bundle(payload: BundleRequest, request: Request):
-    if not DOWNLOAD_PASSPHRASE:
-        raise HTTPException(status_code=404, detail="Not available.")
-    if passphrase_locked_out():
-        raise HTTPException(status_code=429, detail="Too many incorrect attempts. Wait a minute and try again.")
-    if not safe_equals(payload.passphrase.strip(), DOWNLOAD_PASSPHRASE):
-        _passphrase_failures.append(time.monotonic())
-        raise HTTPException(status_code=401, detail="That passphrase isn't right.")
-    if not os.path.isfile(WATCHER_EXE):
-        raise HTTPException(status_code=404, detail="The watcher download is not available on this server yet.")
+# One-time download links, token -> expiry (monotonic seconds).
+#
+# The setup page used to fetch the whole zip in JavaScript and only then hand
+# it to the browser: 17.5 MB through the tunnel behind a button that just said
+# "Preparing...", with no progress bar, then the virus scan on top -- 20-45 s
+# that looked like a hang. Now the passphrase is checked by a POST that
+# returns a link, and the browser downloads the link itself, with its own
+# progress bar from the first byte. The passphrase never goes in a URL; the
+# link is single-use and expires in a minute, and is worth no more than the
+# passphrase that was needed to get it.
+BUNDLE_LINK_SECONDS = 60
+_bundle_links: dict[str, float] = {}
 
+
+def _bundle_response(request: Request) -> Response:
     config = {"server_url": f"{public_base_url(request)}/api/log-update"}
     if INGESTION_TOKEN:
         config["ingestion_token"] = INGESTION_TOKEN
@@ -1579,6 +1584,45 @@ def download_watcher_bundle(payload: BundleRequest, request: Request):
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="LanDashboardWatcher.zip"'},
     )
+
+
+@app.post("/api/watcher-bundle")
+def download_watcher_bundle(payload: BundleRequest, request: Request):
+    if not DOWNLOAD_PASSPHRASE:
+        raise HTTPException(status_code=404, detail="Not available.")
+    if passphrase_locked_out():
+        raise HTTPException(status_code=429, detail="Too many incorrect attempts. Wait a minute and try again.")
+    if not safe_equals(payload.passphrase.strip(), DOWNLOAD_PASSPHRASE):
+        _passphrase_failures.append(time.monotonic())
+        raise HTTPException(status_code=401, detail="That passphrase isn't right.")
+    if not os.path.isfile(WATCHER_EXE):
+        raise HTTPException(status_code=404, detail="The watcher download is not available on this server yet.")
+
+    if payload.link:
+        now = time.monotonic()
+        for expired in [t for t, until in _bundle_links.items() if until <= now]:
+            del _bundle_links[expired]
+        token = secrets.token_urlsafe(32)
+        _bundle_links[token] = now + BUNDLE_LINK_SECONDS
+        return {"url": f"/api/watcher-bundle/{token}"}
+    # The zip itself: what setup pages from before the link existed ask for.
+    return _bundle_response(request)
+
+
+@app.get("/api/watcher-bundle/{token}")
+def download_watcher_bundle_link(token: str, request: Request):
+    # Single use: taken out as it is used, so a link that leaks from a
+    # browser history or a proxy log is already dead.
+    until = _bundle_links.pop(token, None)
+    if until is None or until <= time.monotonic() or not os.path.isfile(WATCHER_EXE):
+        # A browser navigated here, so answer in words, not JSON.
+        return HTMLResponse(
+            "<!DOCTYPE html><meta charset='utf-8'><title>Link expired</title>"
+            "<body style='font-family:system-ui;background:#111;color:#ddd;padding:40px'>"
+            "<p>This download link has expired or was already used.</p>"
+            "<p><a style='color:#f3a73c' href='/setup'>Back to Setup</a> and enter the passphrase again.</p>",
+            status_code=410)
+    return _bundle_response(request)
 
 
 @app.get("/analytics")
