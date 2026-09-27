@@ -313,6 +313,7 @@
         <div id="heroSlot"></div>
         <div class="eyebrow" id="packLabel" style="margin:16px 0 10px" hidden>The pack</div>
         <div id="bigRows"></div>
+        <div class="eyebrow" id="bigMore" style="margin-top:14px" hidden></div>
     </section>
 </div>
 
@@ -488,13 +489,31 @@
     // rebuilds the option list from whoever's actually present rather than
     // hardcoding it. Preserves the current selection if it's still valid, so
     // picking a guild doesn't get silently undone by the next re-render.
+    //
+    // A guild is its name AND its faction: a Horde guild and an Alliance
+    // guild can share a name, and keyed by name alone they merged into one
+    // option that showed both. The faction is only spelled out in the label
+    // when a name actually exists on both sides, so the list stays clean.
+    function guildKey(player) {
+        return JSON.stringify([player.faction || "", player.guild]);
+    }
+
     function updateGuildOptions(players) {
         const select = document.getElementById("guildFilter");
         const currentValue = select.value;
-        const guilds = [...new Set(players.map(p => p.guild).filter(Boolean))].sort((a, b) => a.localeCompare(b));
-        select.innerHTML = '<option value="">All Guilds</option>' +
-            guilds.map(g => `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`).join("");
-        if (guilds.includes(currentValue)) select.value = currentValue;
+        const byKey = new Map();
+        for (const p of players) {
+            if (p.guild) byKey.set(guildKey(p), { name: p.guild, faction: p.faction || "" });
+        }
+        const nameCount = {};
+        for (const g of byKey.values()) nameCount[g.name] = (nameCount[g.name] || 0) + 1;
+        const guilds = [...byKey.entries()].sort(([, a], [, b]) =>
+            a.name.localeCompare(b.name) || a.faction.localeCompare(b.faction));
+        select.innerHTML = '<option value="">All Guilds</option>' + guilds.map(([key, g]) => {
+            const label = nameCount[g.name] > 1 && g.faction ? `${g.name} (${g.faction})` : g.name;
+            return `<option value="${escapeHtml(key)}">${escapeHtml(label)}</option>`;
+        }).join("");
+        if (byKey.has(currentValue)) select.value = currentValue;
     }
 
     function renderStrip(players, allPlayers) {
@@ -538,7 +557,7 @@
         const guildFilter = document.getElementById("guildFilter").value;
 
         if (searchQuery) players = players.filter(p => p.name.toLowerCase().includes(searchQuery));
-        if (guildFilter) players = players.filter(p => p.guild === guildFilter);
+        if (guildFilter) players = players.filter(p => p.guild && guildKey(p) === guildFilter);
         if (factionFilter) players = players.filter(p => p.faction === factionFilter);
         if (classFilter) players = players.filter(p => p.class === classFilter);
 
@@ -591,14 +610,23 @@
         const heroSlot = document.getElementById("heroSlot");
         const rowsHost = document.getElementById("bigRows");
         const packLabel = document.getElementById("packLabel");
+        const moreLabel = document.getElementById("bigMore");
         if (!players.length) {
             heroSlot.innerHTML = "";
             packLabel.hidden = true;
+            moreLabel.hidden = true;
             rowsHost.innerHTML = `<div class="empty-state">${emptyMessage}</div>`;
             return;
         }
-        const featured = ranked ? players[0] : null;
-        const rest = ranked ? players.slice(1) : players;
+        // Only the top of the list: a TV across the room has no one to press
+        // Next, and fifty rows would just scroll off the bottom. Everyone else
+        // is on the ladder, and the note says how many.
+        const shown = players.slice(0, BIG_SCREEN_TOP);
+        const hiddenCount = players.length - shown.length;
+        moreLabel.hidden = hiddenCount === 0;
+        moreLabel.textContent = `+ ${hiddenCount} more on the ladder`;
+        const featured = ranked ? shown[0] : null;
+        const rest = ranked ? shown.slice(1) : shown;
         morphChildren(heroSlot, featured ? buildHero(featured) : "");
         packLabel.hidden = !featured || !rest.length;
         morphChildren(rowsHost, rest.map((p, i) => buildBigRow(p, ranked ? i + 2 : i + 1)).join(""));
@@ -609,6 +637,7 @@
     // you back to page 1. Changing what is shown does go back, since page 3 of
     // the old results means nothing once the results are different.
     let ladderPage = 0;
+    const BIG_SCREEN_TOP = 15;      // the leader card plus 14 rows
     function filtersChanged() {
         ladderPage = 0;
         renderDashboard();

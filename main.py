@@ -142,6 +142,32 @@ linked_characters: set[str] = set()      # seen with at least one id
 ALT_TAG = "alt"
 
 
+# Which player each character belongs to, and each player's display name.
+person_of: dict[str, int] = {}
+person_names: dict[int, str] = {}
+PERSON_NAME_MAX_LENGTH = 40
+
+
+def choose_person(player: str, watcher_ids, account_ids) -> int | None:
+    """The existing player a newly linked character belongs with, if any.
+
+    The account comes first: every character on a WoW account shares its
+    SavedVariables folder, so that link survives a reinstall and is the
+    stronger of the two. The install comes second -- it is also what two
+    people sharing one PC have in common, which is the case the operator
+    may need to split by hand."""
+    for index, ids in ((characters_by_account, account_ids), (characters_by_watcher, watcher_ids)):
+        for key in ids:
+            for other in sorted(index.get(key, set()) - {player}):
+                if other in person_of:
+                    return person_of[other]
+    return None
+
+
+def next_person_id() -> int:
+    return max(person_names, default=0) + 1
+
+
 def remember_link(player: str, watcher_id: str | None, account_id: str | None):
     linked_characters.add(player)
     if watcher_id:
@@ -540,6 +566,27 @@ async def startup_event():
             )
         """)
 
+        # Players: the people behind the characters. A character is assigned
+        # to one the first time it arrives with a watcher or account id --
+        # joining whoever already owns that account, else that install, else
+        # a new player named after it -- and after that only the operator
+        # moves it. Stored rather than recomputed from the ids on every read,
+        # so a merge or a split made on the roster page stays made.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS people (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS character_person (
+                player TEXT PRIMARY KEY,
+                person_id INTEGER NOT NULL,
+                updated_at TEXT
+            )
+        """)
+
         # Operator-curated metadata the game has no way of telling us:
         # a streaming link and freeform tags (group assignment, "LAN local", etc).
         await db.execute("""
@@ -628,6 +675,39 @@ async def reload_states_from_db():
         async with db.execute("SELECT player, watcher_id, account_id FROM character_sources") as cursor:
             for row in await cursor.fetchall():
                 remember_link(row["player"], row["watcher_id"] or None, row["account_id"] or None)
+
+        async with db.execute("SELECT id, name FROM people") as cursor:
+            for row in await cursor.fetchall():
+                person_names[row["id"]] = row["name"]
+        async with db.execute("SELECT player, person_id FROM character_person") as cursor:
+            for row in await cursor.fetchall():
+                person_of[row["player"]] = row["person_id"]
+
+        # Characters linked before players existed get one now, oldest first,
+        # by the same rule a new character gets at ingest -- so a database
+        # from before this feature comes out grouped, not as one player per
+        # character. Only ever touches characters without a player.
+        async with db.execute("""
+            SELECT player, MIN(first_seen) AS first,
+                   group_concat(watcher_id) AS watchers, group_concat(account_id) AS accounts
+              FROM character_sources GROUP BY player ORDER BY first, player
+        """) as cursor:
+            pending = [r for r in await cursor.fetchall() if r["player"] not in person_of]
+        now = datetime.now(timezone.utc).isoformat()
+        for row in pending:
+            watchers = {w for w in (row["watchers"] or "").split(",") if w}
+            accounts = {a for a in (row["accounts"] or "").split(",") if a}
+            person_id = choose_person(row["player"], watchers, accounts)
+            if person_id is None:
+                person_id = next_person_id()
+                person_names[person_id] = row["player"]
+                await db.execute("INSERT INTO people (id, name, created_at) VALUES (?, ?, ?)",
+                                 (person_id, row["player"], now))
+            person_of[row["player"]] = person_id
+            await db.execute("INSERT INTO character_person (player, person_id, updated_at) VALUES (?, ?, ?)",
+                             (row["player"], person_id, now))
+        if pending:
+            await db.commit()
 
 # --- WEBSOCKET CONNECTION MANAGER ---
 class ConnectionManager:
@@ -1214,6 +1294,19 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
             # Decided here, from the in-memory index, but only applied below
             # once the event is saved, so a failed write leaves no stray tag.
             new_tags = None
+            new_person = None           # (person_id, name if the player is new)
+            if (watcher_id or account_id) and player_name not in person_of:
+                person_id = choose_person(player_name, {watcher_id} - {None}, {account_id} - {None})
+                person_name = None
+                if person_id is None:
+                    person_id, person_name = next_person_id(), player_name
+                    await db.execute("INSERT INTO people (id, name, created_at) VALUES (?, ?, ?)",
+                                     (person_id, person_name, state["last_activity"]))
+                await db.execute("""
+                    INSERT INTO character_person (player, person_id, updated_at) VALUES (?, ?, ?)
+                    ON CONFLICT(player) DO NOTHING
+                """, (player_name, person_id, state["last_activity"]))
+                new_person = (person_id, person_name)
             if (watcher_id or account_id) and player_name not in linked_characters:
                 siblings = (characters_by_watcher.get(watcher_id, set())
                             | characters_by_account.get(account_id, set())) - {player_name}
@@ -1241,6 +1334,11 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
             remember_link(player_name, watcher_id, account_id)
         if new_tags is not None:
             player_states[player_name]["tags"] = new_tags
+        if new_person is not None:
+            person_id, person_name = new_person
+            if person_name is not None:
+                person_names[person_id] = person_name
+            person_of[player_name] = person_id
 
         # Broadcast the data out live to viewers
         await broadcast_player(player_name)
@@ -2154,65 +2252,154 @@ async def record_unauthorised_ingest(request: Request, exc: StarletteHTTPExcepti
 
 @app.get("/api/people")
 async def get_people(_user: str = Depends(require_operator)):
-    """Characters grouped into the people playing them.
+    """Players and their characters, for the roster page's Players tab.
 
-    Two characters belong to the same person when they share a watcher
-    install or a WoW account -- and that chains: an alt on the same account
-    as a main, played on the same PC as a third character, makes all three
-    one person. Worked out on every request from character_sources rather
-    than stored, so nothing has to be rewritten if the rule changes.
-
-    Known limits, both from what the ids can and cannot see: two people
-    sharing one PC share one install and are merged, and one person on two
-    PCs with two accounts looks like two people. A manual merge/split on the
-    roster page is the planned answer to both.
+    Grouping is stored (see the people table): assigned automatically when a
+    character first arrives with a watcher or account id, and edited by the
+    operator after that. Known limits of the automatic part, both from what
+    the ids can see: two people sharing one PC share an install, and one
+    person on two PCs with two accounts looks like two people -- which is
+    what move and merge are for.
     """
     async with aiosqlite.connect(DB_FILE) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT player, watcher_id, account_id, first_seen, last_seen, events FROM character_sources")
-        rows = [dict(r) for r in await cursor.fetchall()]
+        sources = [dict(r) for r in await cursor.fetchall()]
 
-    # Union-find over characters, joined through each shared id.
-    parent: dict[str, str] = {}
+    def member(name: str) -> dict:
+        state = player_states.get(name) or {}
+        return {"name": name, "level": state.get("level"), "class": state.get("class"),
+                "faction": state.get("faction"), "tags": state.get("tags") or [],
+                "hidden": name in hidden_players}
 
-    def find(x: str) -> str:
-        parent.setdefault(x, x)
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
+    people = {pid: {"id": pid, "name": pname, "characters": [], "watcher_ids": set(), "account_ids": set(),
+                    "first_seen": None, "last_seen": None, "events": 0}
+              for pid, pname in person_names.items()}
+    for name, pid in person_of.items():
+        if pid in people:
+            people[pid]["characters"].append(name)
+    for row in sources:
+        person = people.get(person_of.get(row["player"]))
+        if person is None:
+            continue
+        if row["watcher_id"]:
+            person["watcher_ids"].add(row["watcher_id"])
+        if row["account_id"]:
+            person["account_ids"].add(row["account_id"])
+        person["first_seen"] = min(filter(None, (person["first_seen"], row["first_seen"])), default=None)
+        person["last_seen"] = max(filter(None, (person["last_seen"], row["last_seen"])), default=None)
+        person["events"] += row["events"]
 
-    first_with: dict[tuple[str, str], str] = {}
-    for r in rows:
-        find(r["player"])
-        for kind in ("watcher_id", "account_id"):
-            if r[kind]:
-                key = (kind, r[kind])
-                if key in first_with:
-                    parent[find(r["player"])] = find(first_with[key])
-                else:
-                    first_with[key] = r["player"]
+    result = []
+    for person in people.values():
+        if not person["characters"]:
+            continue
+        person["characters"].sort()
+        person["members"] = [member(n) for n in person["characters"]]
+        person["watcher_ids"] = sorted(person["watcher_ids"])
+        person["account_ids"] = sorted(person["account_ids"])
+        result.append(person)
+    result.sort(key=lambda p: (p["last_seen"] or "", p["name"].lower()), reverse=True)
+    unlinked = sorted((n for n in player_states if n not in person_of), key=str.lower)
+    return {"people": result, "unlinked": [member(n) for n in unlinked]}
 
-    groups: dict[str, dict] = {}
-    for r in rows:
-        g = groups.setdefault(find(r["player"]), {
-            "characters": set(), "watcher_ids": set(), "account_ids": set(),
-            "first_seen": r["first_seen"], "last_seen": r["last_seen"], "events": 0,
-        })
-        g["characters"].add(r["player"])
-        if r["watcher_id"]:
-            g["watcher_ids"].add(r["watcher_id"])
-        if r["account_id"]:
-            g["account_ids"].add(r["account_id"])
-        g["first_seen"] = min(g["first_seen"], r["first_seen"])
-        g["last_seen"] = max(g["last_seen"], r["last_seen"])
-        g["events"] += r["events"]
 
-    people = [{**g, **{k: sorted(g[k]) for k in ("characters", "watcher_ids", "account_ids")}}
-              for g in groups.values()]
-    people.sort(key=lambda p: p["last_seen"], reverse=True)
-    return {"people": people}
+class RenamePersonPayload(BaseModel):
+    name: str
+
+
+class MovePayload(BaseModel):
+    player: str
+    person_id: int | None = None      # None: out into a player of its own
+
+
+class MergePayload(BaseModel):
+    from_id: int
+    into_id: int
+
+
+async def _drop_empty_people(db) -> None:
+    empty = [pid for pid in person_names if pid not in set(person_of.values())]
+    for pid in empty:
+        await db.execute("DELETE FROM people WHERE id = ?", (pid,))
+        del person_names[pid]
+
+
+@app.post("/api/people/{person_id}/rename")
+async def rename_person(person_id: int, payload: RenamePersonPayload, _user: str = Depends(require_operator)):
+    name = payload.name.strip()[:PERSON_NAME_MAX_LENGTH]
+    if person_id not in person_names:
+        raise HTTPException(status_code=404, detail="No such player.")
+    if not name:
+        raise HTTPException(status_code=422, detail="A player needs a name.")
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("UPDATE people SET name = ? WHERE id = ?", (name, person_id))
+        await db.commit()
+    person_names[person_id] = name
+    return {"status": "success", "id": person_id, "name": name}
+
+
+@app.post("/api/people/move")
+async def move_character(payload: MovePayload, _user: str = Depends(require_operator)):
+    """Moves one character to another player -- or, with no person_id, out
+    into a player of its own, which is how a wrong grouping is split."""
+    player = payload.player
+    if player not in player_states and player not in person_of:
+        raise HTTPException(status_code=404, detail=f"No character called {player!r}")
+    if payload.person_id is not None and payload.person_id not in person_names:
+        raise HTTPException(status_code=404, detail="No such player.")
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_FILE) as db:
+        person_id = payload.person_id
+        new_name = None
+        if person_id is None:
+            person_id, new_name = next_person_id(), player
+            await db.execute("INSERT INTO people (id, name, created_at) VALUES (?, ?, ?)", (person_id, new_name, now))
+        await db.execute("""
+            INSERT INTO character_person (player, person_id, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(player) DO UPDATE SET person_id=excluded.person_id, updated_at=excluded.updated_at
+        """, (player, person_id, now))
+        if new_name is not None:
+            person_names[person_id] = new_name
+        person_of[player] = person_id
+
+        # Split out on its own, a character is its new player's main, so an
+        # automatic "alt" tag -- given because it was grouped with someone
+        # else's characters -- no longer applies. Moving into another player
+        # leaves tags alone; that's the operator's call on the Roster tab.
+        state = player_states.get(player)
+        retagged = False
+        if new_name is not None and state and ALT_TAG in (state.get("tags") or []):
+            state["tags"] = [t for t in state["tags"] if t != ALT_TAG]
+            await db.execute("""
+                INSERT INTO player_roster_meta (player, tags, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(player) DO UPDATE SET tags=excluded.tags, updated_at=excluded.updated_at
+            """, (player, json.dumps(state["tags"]), now))
+            retagged = True
+        await _drop_empty_people(db)
+        await db.commit()
+    if retagged:
+        await broadcast_player(player)
+    return {"status": "success", "player": player, "person_id": person_id}
+
+
+@app.post("/api/people/merge")
+async def merge_people(payload: MergePayload, _user: str = Depends(require_operator)):
+    if payload.from_id not in person_names or payload.into_id not in person_names:
+        raise HTTPException(status_code=404, detail="No such player.")
+    if payload.from_id == payload.into_id:
+        raise HTTPException(status_code=422, detail="A player can't be merged into itself.")
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("UPDATE character_person SET person_id = ?, updated_at = ? WHERE person_id = ?",
+                         (payload.into_id, now, payload.from_id))
+        for name, pid in list(person_of.items()):
+            if pid == payload.from_id:
+                person_of[name] = payload.into_id
+        await _drop_empty_people(db)
+        await db.commit()
+    return {"status": "success", "into_id": payload.into_id}
 
 
 @app.get("/api/traffic")
