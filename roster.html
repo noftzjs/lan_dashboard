@@ -503,7 +503,7 @@
         return `<select data-move="${escapeHtml(characterName)}" aria-label="Move ${escapeHtml(characterName)}">
                     <option value="">${currentId == null ? "Assign to\u2026" : "Move to\u2026"}</option>
                     ${options}
-                    ${currentId == null ? "" : `<option value="new">Their own player (split out)</option>`}
+                    <option value="new">${currentId == null ? "A new player (just this character)" : "Their own player (split out)"}</option>
                 </select>`;
     }
 

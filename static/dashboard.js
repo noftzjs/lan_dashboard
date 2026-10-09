@@ -119,8 +119,10 @@ function streamBadgesHtml(player) {
 }
 
 // Connects the shared websocket feed. onUpdate is called after playerData
-// changes, so each page can re-render however it needs to.
-function connectWebSocket(onUpdate) {
+// changes, so each page can re-render however it needs to. onPlayerUpdate,
+// if given, sees one character's previous and new state (previous is
+// undefined the first time), which is how the dashboard notices a level-up.
+function connectWebSocket(onUpdate, onPlayerUpdate) {
     const ws = new WebSocket(`${SERVER.protocol}//${SERVER.host}/ws/dashboard`);
     const statusDiv = document.getElementById("status");
 
@@ -138,7 +140,9 @@ function connectWebSocket(onUpdate) {
             Object.values(playerData).forEach(stampReceived);
             if (msg.stale_after_seconds != null) staleAfterSeconds = msg.stale_after_seconds;
         } else if (msg.event === "PLAYER_UPDATE") {
+            const previous = playerData[msg.player];
             playerData[msg.player] = stampReceived(msg.state);
+            if (onPlayerUpdate) onPlayerUpdate(msg.player, previous, playerData[msg.player]);
         } else if (msg.event === "PLAYER_REMOVED") {
             // The operator hid this character. Dropped at once, so it leaves
             // the big screen while people are looking, not at the next reload.

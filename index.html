@@ -62,6 +62,13 @@
         /* `table.ladder th` (0-1-2) outranks `.num` (0-1-0), so a header cell
            kept its left alignment while the numbers under it went right. */
         table.ladder th.num { text-align: right; }
+        /* Gold, Played and Last sync re-sort the rows; Progress puts the ranked
+           order back. The arrow marks the live one, aria-sort carries it. */
+        table.ladder th.sortable { cursor: pointer; user-select: none; }
+        table.ladder th.sortable:hover, table.ladder th.sortable:focus-visible { color: var(--text-muted); outline: none; }
+        table.ladder th.sortable[aria-sort="ascending"], table.ladder th.sortable[aria-sort="descending"] { color: #e8c37a; }
+        table.ladder th.sortable[aria-sort="ascending"]::after { content: " \25B2"; font-size: 8px; }
+        table.ladder th.sortable[aria-sort="descending"]::after { content: " \25BC"; font-size: 8px; }
         table.ladder td { padding: 8px; border-bottom: 1px solid #1e1e25; vertical-align: middle; }
         table.ladder tbody tr:last-child td { border-bottom: none; }
         table.ladder tbody tr:hover td { background-color: var(--card-color-hover); }
@@ -202,9 +209,23 @@
             .hero .right { margin-left: 0; text-align: left; }
             .big-row .lvl { margin-left: 0; }
         }
+        /* ---------------- Level-up toasts ---------------- */
+        .toasts { position: fixed; right: 20px; bottom: 20px; z-index: 50; display: flex; flex-direction: column; gap: 10px; pointer-events: none; }
+        .toast { min-width: 260px; max-width: 420px; padding: 12px 16px; border-radius: 10px; background-color: var(--card-color);
+                 border: 1px solid #e8c37a; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55); animation: toast-in 0.3s ease-out; }
+        .toast .who { font-weight: 700; font-size: 16px; }
+        .toast .what { color: var(--text-muted); font-size: 13px; }
+        .toast.leaving { animation: toast-out 0.5s ease-in forwards; }
+        /* Read from across the room on the big screen. */
+        .toasts.big .toast { min-width: 360px; padding: 18px 24px; }
+        .toasts.big .toast .who { font-size: 26px; }
+        .toasts.big .toast .what { font-size: 18px; }
+        @keyframes toast-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+        @keyframes toast-out { to { opacity: 0; transform: translateY(8px); } }
     </style>
 </head>
 <body>
+<div id="toasts" class="toasts" aria-live="polite"></div>
 
 <div class="container">
     <header>
@@ -242,10 +263,6 @@
             <option value="active">Active only</option>
             <option value="all">Show all</option>
         </select>
-        <select id="sortBy" onchange="filtersChanged()">
-            <option value="level">Sort by Level</option>
-            <option value="name">Sort Alphabetically</option>
-        </select>
     </div>
 
     <div id="strip" class="stat-strip"></div>
@@ -281,11 +298,11 @@
                         <th>Tags</th>
                         <th>Faction</th>
                         <th class="num">Lvl</th>
-                        <th>Progress</th>
-                        <th>Gold</th>
-                        <th>Played</th>
+                        <th class="sortable" data-sort="reset" role="button" tabindex="0" title="Back to the ranked order">Progress</th>
+                        <th class="sortable" data-sort="gold" role="button" tabindex="0" aria-sort="none" title="Sort by gold">Gold</th>
+                        <th class="sortable" data-sort="played" role="button" tabindex="0" aria-sort="none" title="Sort by time played">Played</th>
                         <th>Zone</th>
-                        <th class="num">Last sync</th>
+                        <th class="num sortable" data-sort="sync" role="button" tabindex="0" aria-sort="none" title="Sort by last sync">Last sync</th>
                     </tr>
                 </thead>
                 <tbody id="ladderBody"></tbody>
@@ -345,6 +362,7 @@
         try { localStorage.setItem("dashboardView", viewMode); } catch (e) { /* ignore */ }
         document.getElementById("ladderView").hidden = viewMode !== "ladder";
         document.getElementById("bigView").hidden = viewMode !== "big";
+        document.getElementById("toasts").classList.toggle("big", viewMode === "big");
         document.getElementById("viewLadder").setAttribute("aria-pressed", String(viewMode === "ladder"));
         document.getElementById("viewBig").setAttribute("aria-pressed", String(viewMode === "big"));
         renderDashboard();
@@ -375,10 +393,10 @@
             .join("");
     }
 
-    // Rank colour only means something when the list is ranked by level —
-    // alphabetical "#1" is just whoever starts with A.
-    function rankClass(rank, ranked) {
-        return ranked && rank <= 3 ? ` r${rank}` : "";
+    // Rank is always the level order, so the top three keep their colour
+    // whichever column a ladder header has sorted the rows by.
+    function rankClass(rank) {
+        return rank <= 3 ? ` r${rank}` : "";
     }
 
     // Every tag gets a chip -- no "+N" rollup. The row can't grow taller
@@ -393,7 +411,7 @@
         return `<div class="tag-row" title="${escapeHtml(tags.map(t => tagTitle(player, t)).join(", "))}">${chips}</div>`;
     }
 
-    function buildLadderRow(player, rank, ranked) {
+    function buildLadderRow(player, rank) {
         const classColor = CLASS_COLORS[player.class] || "var(--text-color)";
         const factionClass = player.faction === "Alliance" ? "faction-alliance"
             : player.faction === "Horde" ? "faction-horde" : "";
@@ -405,7 +423,7 @@
         ].filter(Boolean).join(" · ");
         return `
             <tr id="${playerElementId("row", player.name)}" class="${isStale(player) ? "idle-row" : ""}">
-                <td class="rk${rankClass(rank, ranked)}">${rank}</td>
+                <td class="rk${rankClass(rank)}">${rank}</td>
                 <td>
                     <div class="cname" style="color:${classColor}">${escapeHtml(player.name)}${streamBadgesHtml(player)}</div>
                     <div class="csub">${sub || "No profile yet"}</div>
@@ -540,7 +558,6 @@
 
     function renderDashboard() {
         const searchQuery = document.getElementById("searchBar").value.toLowerCase();
-        const sortBy = document.getElementById("sortBy").value;
         const factionFilter = document.getElementById("factionFilter").value;
         const classFilter = document.getElementById("classFilter").value;
 
@@ -567,12 +584,11 @@
         if (factionFilter) players = players.filter(p => p.faction === factionFilter);
         if (classFilter) players = players.filter(p => p.class === classFilter);
 
-        const ranked = sortBy === "level";
-        if (ranked) {
-            players.sort((a, b) => b.level - a.level || b.pct - a.pct);
-        } else {
-            players.sort((a, b) => a.name.localeCompare(b.name));
-        }
+        players.sort((a, b) => b.level - a.level || b.pct - a.pct);
+        // The rank column keeps this level order even when a ladder header
+        // re-sorts the rows: 3rd by level still reads as 3rd while you look at gold.
+        players.forEach((p, i) => { p._rank = i + 1; });
+        if (ladderSort && viewMode === "ladder") players.sort(ladderComparator(ladderSort));
 
         document.getElementById("playerCount").textContent =
             players.length ? `${players.length} player${players.length === 1 ? "" : "s"}` : "";
@@ -583,8 +599,9 @@
             : "No characters leveling yet...";
 
         if (viewMode === "ladder") {
-            document.getElementById("ladderSub").textContent =
-                ranked ? "Live · sorted by level" : "Live · sorted by name";
+            document.getElementById("ladderSub").textContent = ladderSort
+                ? `Live · ${LADDER_COLUMNS[ladderSort.key][ladderSort.dir]} first`
+                : "Live · sorted by level";
             const body = document.getElementById("ladderBody");
             if (!players.length) {
                 body.innerHTML = `<tr><td colspan="10" class="empty-state">${emptyMessage}</td></tr>`;
@@ -598,7 +615,7 @@
             ladderPage = Math.min(ladderPage, pages - 1);      // the list can shrink under us
             const start = ladderPage * pageSize;
             const pageRows = players.slice(start, start + pageSize);
-            morphChildren(body, pageRows.map((p, i) => buildLadderRow(p, start + i + 1, ranked)).join(""));
+            morphChildren(body, pageRows.map(p => buildLadderRow(p, p._rank)).join(""));
 
             // Shown once there is more than the smallest page, so choosing
             // "All" never hides the control that would switch it back.
@@ -611,8 +628,7 @@
             return;
         }
 
-        // Big screen: the leader is featured only when the list is actually
-        // ranked, for the same reason rank colours are.
+        // Big screen: the level leader is featured, the rest follow in rank order.
         const heroSlot = document.getElementById("heroSlot");
         const rowsHost = document.getElementById("bigRows");
         const packLabel = document.getElementById("packLabel");
@@ -631,11 +647,11 @@
         const hiddenCount = players.length - shown.length;
         moreLabel.hidden = hiddenCount === 0;
         moreLabel.textContent = `+ ${hiddenCount} more on the ladder`;
-        const featured = ranked ? shown[0] : null;
-        const rest = ranked ? shown.slice(1) : shown;
-        morphChildren(heroSlot, featured ? buildHero(featured) : "");
-        packLabel.hidden = !featured || !rest.length;
-        morphChildren(rowsHost, rest.map((p, i) => buildBigRow(p, ranked ? i + 2 : i + 1)).join(""));
+        const featured = shown[0];
+        const rest = shown.slice(1);
+        morphChildren(heroSlot, buildHero(featured));
+        packLabel.hidden = !rest.length;
+        morphChildren(rowsHost, rest.map((p, i) => buildBigRow(p, i + 2)).join(""));
     }
 
     // --- ladder paging -------------------------------------------------------
@@ -649,6 +665,56 @@
         renderDashboard();
     }
 
+    // --- Ladder header sorting -------------------------------------------
+    // `value` is what a row sorts by (null = unknown, always last); `first`
+    // is the direction a fresh click gives, so one click answers the usual
+    // question: who has the most gold, who has played most, who synced last.
+    // `desc`/`asc` are the words the sub-line shows.
+    const LADDER_COLUMNS = {
+        gold:   { first: "desc", desc: "most gold", asc: "least gold",
+                  value: p => hasGoldToShow(p) && !isWithheld(p, "gold") ? p.gold : null },
+        played: { first: "desc", desc: "most played", asc: "least played",
+                  value: p => p.played_total || null },
+        // "never" counts as the longest idle, so it tops the longest-since view
+        // and sits at the bottom of the most-recent one.
+        sync:   { first: "asc", asc: "most recently synced", desc: "longest since sync",
+                  value: p => p.idle_seconds == null ? Infinity : p.idle_seconds },
+    };
+    let ladderSort = null;      // null = the ranked order; else { key, dir }
+
+    function ladderComparator({ key, dir }) {
+        const column = LADDER_COLUMNS[key];
+        const sign = dir === "desc" ? -1 : 1;
+        return (a, b) => {
+            const va = column.value(a), vb = column.value(b);
+            if (va == null && vb == null) return a._rank - b._rank;
+            if (va == null) return 1;
+            if (vb == null) return -1;
+            return sign * (va - vb) || a._rank - b._rank;    // Infinity - Infinity is NaN: fall back to rank
+        };
+    }
+
+    const ladderHead = document.querySelector("table.ladder thead");
+    function ladderHeaderActivated(event) {
+        const th = event.target.closest("th[data-sort]");
+        if (!th) return;
+        if (event.type === "keydown") {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+        }
+        const key = th.dataset.sort;
+        if (key === "reset") ladderSort = null;
+        else if (ladderSort && ladderSort.key === key) ladderSort = { key, dir: ladderSort.dir === "desc" ? "asc" : "desc" };
+        else ladderSort = { key, dir: LADDER_COLUMNS[key].first };
+        for (const cell of ladderHead.querySelectorAll("th[data-sort]:not([data-sort=reset])")) {
+            const live = ladderSort && cell.dataset.sort === ladderSort.key;
+            cell.setAttribute("aria-sort", live ? (ladderSort.dir === "desc" ? "descending" : "ascending") : "none");
+        }
+        filtersChanged();
+    }
+    ladderHead.addEventListener("click", ladderHeaderActivated);
+    ladderHead.addEventListener("keydown", ladderHeaderActivated);
+
     const pageSizeSelect = document.getElementById("ladderPageSize");
     try {
         const saved = localStorage.getItem("ladderPageSize");
@@ -661,8 +727,41 @@
     document.getElementById("ladderPrev").addEventListener("click", () => { ladderPage--; renderDashboard(); });
     document.getElementById("ladderNext").addEventListener("click", () => { ladderPage++; renderDashboard(); });
 
+    // --- Level-up toasts ---------------------------------------------------
+    // Fired from the shared feed when a character's level goes up. Syncs are
+    // reload-gated, so one update can carry several levels hours late: the
+    // toast names the level reached, and only when a milestone (every
+    // MILESTONE_EVERY levels, or the cap) was crossed, so the fast early game
+    // doesn't turn the big screen into a ticker. INIT replaces the whole table
+    // without passing through here, so a reload or reconnect announces nothing.
+    const MILESTONE_EVERY = 10;
+    const TOAST_SECONDS = 10;
+    const TOASTS_MAX = 3;
+
+    function announceLevelUp(name, before, after) {
+        if (!before || before.level == null || after.level == null) return;
+        if (after.level <= before.level) return;
+        const crossed = Math.floor(after.level / MILESTONE_EVERY) > Math.floor(before.level / MILESTONE_EVERY);
+        if (crossed || isMaxLevel(after)) showToast(name, after);
+    }
+
+    function showToast(name, player) {
+        const host = document.getElementById("toasts");
+        const toast = document.createElement("div");
+        toast.className = "toast";
+        const colour = CLASS_COLORS[player.class] || "var(--text-color)";
+        const what = isMaxLevel(player) ? `has hit the level cap at ${player.level}!` : `has reached level ${player.level}!`;
+        toast.innerHTML = `<div class="who" style="color:${colour}">${escapeHtml(name)}</div><div class="what">${what}</div>`;
+        host.appendChild(toast);
+        while (host.children.length > TOASTS_MAX) host.firstElementChild.remove();
+        setTimeout(() => {
+            toast.classList.add("leaving");
+            setTimeout(() => toast.remove(), 600);
+        }, TOAST_SECONDS * 1000);
+    }
+
     setView(viewMode);
-    connectWebSocket(renderDashboard);
+    connectWebSocket(renderDashboard, announceLevelUp);
 
     // Staleness is a function of time, not of messages — without this a
     // card would only disappear the next time some other player's event
