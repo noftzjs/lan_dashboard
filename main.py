@@ -145,6 +145,32 @@ ALT_TAG = "alt"
 # Which player each character belongs to, and each player's display name.
 person_of: dict[str, int] = {}
 person_names: dict[int, str] = {}
+person_main: dict[int, str | None] = {}
+
+
+def has_alt_tag(name: str) -> bool:
+    return ALT_TAG in {t.lower() for t in (player_states.get(name) or {}).get("tags") or []}
+
+
+def main_of_person(person_id: int) -> str | None:
+    """The chosen main if it still belongs to this player; otherwise the one
+    character not tagged alt, if there is exactly one. Otherwise nobody --
+    better no answer than a guess shown to the whole room."""
+    chosen = person_main.get(person_id)
+    if chosen and person_of.get(chosen) == person_id:
+        return chosen
+    untagged = [c for c, p in person_of.items() if p == person_id and not has_alt_tag(c)]
+    return untagged[0] if len(untagged) == 1 else None
+
+
+def alt_of(name: str) -> str | None:
+    """Whose alt this is, for the hover on its "alt" tag. Only for characters
+    already tagged alt -- the tag is what's public, this just explains it --
+    and never naming a main the operator has hidden."""
+    if name not in person_of or not has_alt_tag(name):
+        return None
+    main = main_of_person(person_of[name])
+    return main if main and main != name and is_public(main) else None
 PERSON_NAME_MAX_LENGTH = 40
 
 
@@ -183,11 +209,16 @@ def idle_seconds(state: dict[str, Any]) -> float | None:
         return None
     return max(0.0, (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds())
 
-def public_state(state: dict[str, Any]) -> dict[str, Any]:
+def public_state(state: dict[str, Any], name: str | None = None) -> dict[str, Any]:
     # The client can't compare last_activity to its own clock (server and
     # browser can be in different timezones or drift), so ship an age the
     # client only has to add its own elapsed-since-receipt time to.
-    return {**state, "idle_seconds": idle_seconds(state)}
+    #
+    # alt_of is worked out here, as the state is sent, rather than stored on
+    # the character: it depends on the grouping, the main, the tags and who
+    # is hidden, and computing it at send time means none of those changes
+    # can leave it stale.
+    return {**state, "idle_seconds": idle_seconds(state), "alt_of": alt_of(name) if name else None}
 
 # --- DATABASE LIFECYCLE ---
 
@@ -579,6 +610,11 @@ async def startup_event():
                 created_at TEXT
             )
         """)
+        # A player's main. Defaults to the character the player was created
+        # from; the operator can choose another on the Players tab.
+        cursor = await db.execute("PRAGMA table_info(people)")
+        if "main_player" not in {row[1] for row in await cursor.fetchall()}:
+            await db.execute("ALTER TABLE people ADD COLUMN main_player TEXT")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS character_person (
                 player TEXT PRIMARY KEY,
@@ -676,12 +712,19 @@ async def reload_states_from_db():
             for row in await cursor.fetchall():
                 remember_link(row["player"], row["watcher_id"] or None, row["account_id"] or None)
 
-        async with db.execute("SELECT id, name FROM people") as cursor:
+        async with db.execute("SELECT id, name, main_player FROM people") as cursor:
             for row in await cursor.fetchall():
                 person_names[row["id"]] = row["name"]
+                person_main[row["id"]] = row["main_player"]
         async with db.execute("SELECT player, person_id FROM character_person") as cursor:
             for row in await cursor.fetchall():
                 person_of[row["player"]] = row["person_id"]
+
+        for pid, pname in person_names.items():
+            if person_main.get(pid) is None and person_of.get(pname) == pid:
+                person_main[pid] = pname
+                await db.execute("UPDATE people SET main_player = ? WHERE id = ?", (pname, pid))
+        await db.commit()
 
         # Characters linked before players existed get one now, oldest first,
         # by the same rule a new character gets at ingest -- so a database
@@ -701,8 +744,9 @@ async def reload_states_from_db():
             if person_id is None:
                 person_id = next_person_id()
                 person_names[person_id] = row["player"]
-                await db.execute("INSERT INTO people (id, name, created_at) VALUES (?, ?, ?)",
-                                 (person_id, row["player"], now))
+                person_main[person_id] = row["player"]
+                await db.execute("INSERT INTO people (id, name, created_at, main_player) VALUES (?, ?, ?, ?)",
+                                 (person_id, row["player"], now, row["player"]))
             person_of[row["player"]] = person_id
             await db.execute("INSERT INTO character_person (player, person_id, updated_at) VALUES (?, ?, ?)",
                              (row["player"], person_id, now))
@@ -1300,8 +1344,8 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                 person_name = None
                 if person_id is None:
                     person_id, person_name = next_person_id(), player_name
-                    await db.execute("INSERT INTO people (id, name, created_at) VALUES (?, ?, ?)",
-                                     (person_id, person_name, state["last_activity"]))
+                    await db.execute("INSERT INTO people (id, name, created_at, main_player) VALUES (?, ?, ?, ?)",
+                                     (person_id, person_name, state["last_activity"], person_name))
                 await db.execute("""
                     INSERT INTO character_person (player, person_id, updated_at) VALUES (?, ?, ?)
                     ON CONFLICT(player) DO NOTHING
@@ -1338,6 +1382,7 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
             person_id, person_name = new_person
             if person_name is not None:
                 person_names[person_id] = person_name
+                person_main[person_id] = person_name
             person_of[player_name] = person_id
 
         # Broadcast the data out live to viewers
@@ -1371,7 +1416,7 @@ async def broadcast_player(name: str):
     await manager.broadcast({
         "event": "PLAYER_UPDATE",
         "player": name,
-        "state": public_state(player_states[name]),
+        "state": public_state(player_states[name], name),
     })
 
 
@@ -1408,7 +1453,7 @@ async def update_roster_meta(player_name: str, payload: RosterMetaPayload, _user
         await db.commit()
 
     await broadcast_player(player_name)
-    return {"status": "success", "state": public_state(state)}
+    return {"status": "success", "state": public_state(state, player_name)}
 
 
 async def _set_hidden(player_name: str, hidden: bool) -> dict:
@@ -1456,7 +1501,7 @@ async def list_hidden(_user: str = Depends(require_operator)):
         rows = await cursor.fetchall()
     return {"hidden": [
         {"name": r["player"], "hidden_at": r["hidden_at"],
-         **public_state(player_states.get(r["player"], default_state()))}
+         **public_state(player_states.get(r["player"], default_state()), r["player"])}
         for r in rows
     ]}
 
@@ -2297,6 +2342,7 @@ async def get_people(_user: str = Depends(require_operator)):
             continue
         person["characters"].sort()
         person["members"] = [member(n) for n in person["characters"]]
+        person["main"] = main_of_person(person["id"])
         person["watcher_ids"] = sorted(person["watcher_ids"])
         person["account_ids"] = sorted(person["account_ids"])
         result.append(person)
@@ -2324,6 +2370,16 @@ async def _drop_empty_people(db) -> None:
     for pid in empty:
         await db.execute("DELETE FROM people WHERE id = ?", (pid,))
         del person_names[pid]
+        person_main.pop(pid, None)
+
+
+async def broadcast_people(*person_ids):
+    """Re-sends every character of these players: moving or merging changes
+    whose alt a character is, and the dashboards' hover should follow."""
+    ids = {pid for pid in person_ids if pid is not None}
+    for name, pid in list(person_of.items()):
+        if pid in ids:
+            await broadcast_player(name)
 
 
 @app.post("/api/people/{person_id}/rename")
@@ -2355,13 +2411,16 @@ async def move_character(payload: MovePayload, _user: str = Depends(require_oper
         new_name = None
         if person_id is None:
             person_id, new_name = next_person_id(), player
-            await db.execute("INSERT INTO people (id, name, created_at) VALUES (?, ?, ?)", (person_id, new_name, now))
+            await db.execute("INSERT INTO people (id, name, created_at, main_player) VALUES (?, ?, ?, ?)",
+                             (person_id, new_name, now, new_name))
         await db.execute("""
             INSERT INTO character_person (player, person_id, updated_at) VALUES (?, ?, ?)
             ON CONFLICT(player) DO UPDATE SET person_id=excluded.person_id, updated_at=excluded.updated_at
         """, (player, person_id, now))
         if new_name is not None:
             person_names[person_id] = new_name
+            person_main[person_id] = new_name
+        old_person = person_of.get(player)
         person_of[player] = person_id
 
         # Split out on its own, a character is its new player's main, so an
@@ -2369,19 +2428,62 @@ async def move_character(payload: MovePayload, _user: str = Depends(require_oper
         # else's characters -- no longer applies. Moving into another player
         # leaves tags alone; that's the operator's call on the Roster tab.
         state = player_states.get(player)
-        retagged = False
         if new_name is not None and state and ALT_TAG in (state.get("tags") or []):
             state["tags"] = [t for t in state["tags"] if t != ALT_TAG]
             await db.execute("""
                 INSERT INTO player_roster_meta (player, tags, updated_at) VALUES (?, ?, ?)
                 ON CONFLICT(player) DO UPDATE SET tags=excluded.tags, updated_at=excluded.updated_at
             """, (player, json.dumps(state["tags"]), now))
-            retagged = True
         await _drop_empty_people(db)
         await db.commit()
-    if retagged:
-        await broadcast_player(player)
+    await broadcast_people(old_person, person_id)
     return {"status": "success", "player": player, "person_id": person_id}
+
+
+class MainPayload(BaseModel):
+    player: str
+
+
+@app.post("/api/people/{person_id}/main")
+async def set_main(person_id: int, payload: MainPayload, _user: str = Depends(require_operator)):
+    """Makes one character this player's main: its "alt" tag comes off and
+    every other character of the player gets one. A character already
+    holding the maximum number of tags is left alone rather than losing a
+    tag the operator chose -- and is named in the reply so the page can say so."""
+    if person_id not in person_names:
+        raise HTTPException(status_code=404, detail="No such player.")
+    if person_of.get(payload.player) != person_id:
+        raise HTTPException(status_code=422, detail=f"{payload.player!r} isn't one of this player's characters.")
+    now = datetime.now(timezone.utc).isoformat()
+    skipped = []
+    async with aiosqlite.connect(DB_FILE) as db:
+        person_main[person_id] = payload.player
+        await db.execute("UPDATE people SET main_player = ? WHERE id = ?", (payload.player, person_id))
+        for name, pid in list(person_of.items()):
+            if pid != person_id or name not in player_states:
+                continue
+            state = player_states[name]
+            tags = state.get("tags") or []
+            has_alt = ALT_TAG in {t.lower() for t in tags}
+            if name == payload.player:
+                new_tags = [t for t in tags if t.lower() != ALT_TAG] if has_alt else None
+            elif not has_alt:
+                if len(tags) >= TAGS_MAX_COUNT:
+                    skipped.append(name)
+                    new_tags = None
+                else:
+                    new_tags = [*tags, ALT_TAG]
+            else:
+                new_tags = None
+            if new_tags is not None:
+                state["tags"] = new_tags
+                await db.execute("""
+                    INSERT INTO player_roster_meta (player, tags, updated_at) VALUES (?, ?, ?)
+                    ON CONFLICT(player) DO UPDATE SET tags=excluded.tags, updated_at=excluded.updated_at
+                """, (name, json.dumps(new_tags), now))
+        await db.commit()
+    await broadcast_people(person_id)
+    return {"status": "success", "main": payload.player, "skipped": skipped}
 
 
 @app.post("/api/people/merge")
@@ -2399,6 +2501,7 @@ async def merge_people(payload: MergePayload, _user: str = Depends(require_opera
                 person_of[name] = payload.into_id
         await _drop_empty_people(db)
         await db.commit()
+    await broadcast_people(payload.into_id)
     return {"status": "success", "into_id": payload.into_id}
 
 
@@ -2440,7 +2543,7 @@ async def traffic_socket(websocket: WebSocket):
 @app.get("/api/leaderboard")
 async def get_leaderboard(sort_by: str = Query("level"), search: str = Query(None)):
     players = [
-        {"name": name, **public_state(stats)}
+        {"name": name, **public_state(stats, name)}
         for name, stats in player_states.items()
         if is_public(name) and (not search or search.lower() in name.lower())
     ]
@@ -2454,7 +2557,7 @@ async def get_leaderboard(sort_by: str = Query("level"), search: str = Query(Non
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket, first_message={
         "event": "INIT",
-        "data": {name: public_state(state) for name, state in player_states.items() if is_public(name)},
+        "data": {name: public_state(state, name) for name, state in player_states.items() if is_public(name)},
         "stale_after_seconds": STALE_AFTER_SECONDS,
     })
     try:

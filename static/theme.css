@@ -5,6 +5,14 @@
    plane, panels that read as panels, and a third ink level for the small
    capitalised labels that layout leans on. Every page shares these, so the
    restyle lands on the roster, setup and analytics pages too. */
+
+/* The hidden attribute always hides. The browser's own rule for it is weak
+   enough that any class setting display (flex, grid...) overrides it, and
+   four elements across the pages were "hidden" but still showing -- a pager
+   with nothing to page, "The pack" on an unranked list. One rule here beats
+   remembering an [hidden] override for every class that sets display. */
+[hidden] { display: none !important; }
+
 :root {
     --bg-color: #0e0e11;
     --card-color: #17171c;

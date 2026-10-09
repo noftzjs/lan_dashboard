@@ -3,6 +3,9 @@
 
 # Runtime data — *.db catches whatever DB_FILE is set to (beta.db, live.db, etc.)
 *.db
+# WAL mode (since 2026-09-27) keeps two companion files beside each database.
+*.db-wal
+*.db-shm
 watcher_backup.csv
 watcher_errors.log
 .watcher_state.json

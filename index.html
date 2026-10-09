@@ -363,9 +363,15 @@
         return `${Math.floor(seconds / 86400)}d ago`;
     }
 
+    // Hover text for one tag. An "alt" tag says whose alt it is, when the
+    // server knows (the player's chosen main, or the one it assumes).
+    function tagTitle(player, tag) {
+        return tag.toLowerCase() === "alt" && player.alt_of ? `Alt of ${player.alt_of}` : tag;
+    }
+
     function tagChipsHtml(player) {
         return (player.tags || [])
-            .map(t => `<span class="tag-chip" title="${escapeHtml(t)}">${escapeHtml(t)}</span>`)
+            .map(t => `<span class="tag-chip" title="${escapeHtml(tagTitle(player, t))}">${escapeHtml(t)}</span>`)
             .join("");
     }
 
@@ -382,9 +388,9 @@
         const tags = player.tags || [];
         if (!tags.length) return "";
         const chips = tags
-            .map(tag => `<span class="tag-chip" title="${escapeHtml(tag)}">${escapeHtml(tag)}</span>`)
+            .map(tag => `<span class="tag-chip" title="${escapeHtml(tagTitle(player, tag))}">${escapeHtml(tag)}</span>`)
             .join("");
-        return `<div class="tag-row" title="${escapeHtml(tags.join(", "))}">${chips}</div>`;
+        return `<div class="tag-row" title="${escapeHtml(tags.map(t => tagTitle(player, t)).join(", "))}">${chips}</div>`;
     }
 
     function buildLadderRow(player, rank, ranked) {

@@ -201,6 +201,7 @@
         .person-foot { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end;
                        margin-top: 8px; font-size: 12px; color: var(--text-muted); }
         .person .flag { font-size: 11px; color: var(--text-dim); margin-left: 6px; }
+        .person .main-flag { color: var(--accent-color); font-weight: 600; }
         .people-section { font-size: 13px; font-weight: 600; margin: 22px 0 4px; }
         .save-status { font-size: 11px; color: var(--text-muted); margin-left: 8px; white-space: nowrap; }
     </style>
@@ -481,9 +482,12 @@
     // name ever has to be escaped into an inline handler.
     let peopleData = { people: [], unlinked: [] };
 
-    function characterCell(m) {
+    // isMain marks the player's main with a quiet label -- deliberately not a
+    // tag: tags are public, and only alts carry one.
+    function characterCell(m, isMain = false) {
         const colour = CLASS_COLORS[m.class] || "var(--text-color)";
         const flags = [
+            isMain ? `<span class="flag main-flag">main</span>` : "",
             ...(m.tags || []).map(t => `<span class="tag-chip">${escapeHtml(t)}</span>`),
             m.hidden ? `<span class="flag">hidden</span>` : "",
         ].join(" ");
@@ -523,7 +527,10 @@
                     </div>
                     <div class="person-meta">${plural(p.characters.length, "character")} · ${plural(p.watcher_ids.length, "PC")} · ${plural(p.account_ids.length, "account")} · last seen ${seen(p.last_seen)}</div>
                     <table><tbody>${p.members.map(m => `
-                        <tr>${characterCell(m)}<td class="move">${moveSelect(m.name, p.id)}</td></tr>`).join("")}
+                        <tr>${characterCell(m, m.name === p.main)}<td class="move">${m.name === p.main || p.members.length < 2 ? ""
+                            : `<button class="btn btn-quiet" data-make-main="${escapeHtml(m.name)}" data-person="${p.id}"
+                                       title="Make this the main: it loses its alt tag, and the others get one">Make main</button>`}
+                            ${moveSelect(m.name, p.id)}</td></tr>`).join("")}
                     </tbody></table>
                     ${peopleData.people.length > 1 ? `
                     <div class="person-foot">
@@ -566,7 +573,24 @@
 
     document.getElementById("peopleSearch").addEventListener("input", renderPeople);
     const playersPanel = document.getElementById("playersPanel");
-    playersPanel.addEventListener("click", (event) => {
+    playersPanel.addEventListener("click", async (event) => {
+        const makeMain = event.target.closest("[data-make-main]");
+        if (makeMain) {
+            const response = await fetch(`/api/people/${makeMain.dataset.person}/main`, {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ player: makeMain.dataset.makeMain }),
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                alert(`That didn't work: ${result.detail || response.status}`);
+            } else if (result.skipped && result.skipped.length) {
+                // Never pushes out a tag the operator chose, so say what was left alone.
+                alert(`${result.skipped.join(", ")} already ${result.skipped.length === 1 ? "has" : "have"} three tags, `
+                      + `so "alt" wasn't added. Remove a tag on the Roster tab to make room.`);
+            }
+            await loadPeople();
+            return;
+        }
         const rename = event.target.closest("[data-rename]");
         if (!rename) return;
         const id = Number(rename.dataset.rename);

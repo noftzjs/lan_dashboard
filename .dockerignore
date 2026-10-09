@@ -6,6 +6,9 @@
 __pycache__/
 *.pyc
 *.db
+# WAL mode (since 2026-09-27) keeps two companion files beside each database.
+*.db-wal
+*.db-shm
 build/
 dist/
 *.spec
