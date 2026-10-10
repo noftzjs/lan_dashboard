@@ -35,6 +35,11 @@
 
         .row { margin-bottom: 14px; }
         .row-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 13px; margin-bottom: 5px; }
+        /* By character / by player: one switch for the composition chart and
+           the roster together, so the two can never disagree. */
+        .group-switch { display: flex; align-items: center; gap: 6px; margin: 0 0 14px; }
+        .group-switch-label { font-size: 12px; color: var(--text-muted); margin-right: 4px; }
+        .group-switch .nav-link[aria-pressed="true"] { color: var(--accent-color); border-color: var(--accent-color); }
         .who { display: flex; align-items: center; gap: 7px; min-width: 0; }
         .chip { width: 9px; height: 9px; border-radius: 2px; flex: none; }
         .who .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -178,6 +183,12 @@
         </div>
     </header>
 
+    <div class="group-switch" role="group" aria-label="Group the composition and roster by">
+        <span class="group-switch-label">Show</span>
+        <button type="button" class="nav-link" data-grouping="character" aria-pressed="true">By character</button>
+        <button type="button" class="nav-link" data-grouping="player" aria-pressed="false">By player</button>
+    </div>
+
     <div class="panel">
         <h2>At a glance</h2>
         <p class="answers">Everything recorded since this dashboard started collecting.</p>
@@ -217,6 +228,12 @@
     </div>
 
     <div class="panel">
+        <h2>Gold over time</h2>
+        <p class="answers">Who's rich, and when they got there. One point per login or level-up, so a training spree shows up at the next one. The richest is highlighted; hover any line or name to follow that character.</p>
+        <div id="gold"></div>
+    </div>
+
+    <div class="panel">
         <h2>When everyone played</h2>
         <p class="answers">One square per character per hour &mdash; or per few hours, once the data covers more than a few days &mdash; brighter where more happened. The dark stretches are hours with nothing recorded &mdash; sleep, mostly.</p>
         <div id="activity"></div>
@@ -235,7 +252,7 @@
     </div>
 </div>
 
-<script src="/static/dashboard.js"></script>
+<script src="/static/dashboard.js?v=20261009"></script>
 <!-- d3 scales and ticks only, vendored (see static/vendor/d3/README.md).
      Order matters: each module reads the ones before it off the d3 global. -->
 <script src="/static/vendor/d3/d3-array.min.js"></script>
@@ -281,6 +298,15 @@
         return `${Math.round(seconds / 86400)}d`;
     }
 
+    // Money as plain text, two units at most: "88s", "4g 52s", "21g". Copper
+    // is left off because nobody reads a chart in it. For HTML with coin
+    // colours use formatGold from dashboard.js instead.
+    const gs = v => {
+        const p = goldParts(v);
+        if (!p.gold) return `${p.silver}s`;
+        return p.silver ? `${p.gold}g ${p.silver}s` : `${p.gold}g`;
+    };
+
     function classChip(cls) {
         const colour = CLASS_COLORS[cls] || "var(--text-muted)";
         return `<span class="chip" style="background-color:${colour}"></span>`;
@@ -289,12 +315,25 @@
     function renderKpis(d) {
         const t = d.totals;
         const timed = d.history.timed_rows;
+        // Per character, so a player's alts each count: say "characters" in
+        // the sub-lines so nobody reads these as per-person figures.
+        const played = d.players.filter(p => p.played_total);
+        const playedTotal = played.reduce((sum, p) => sum + p.played_total, 0);
+        // Null gold is never-reported or kept private; both stay out of the
+        // sum and are what "n of m sharing" is about.
+        const sharing = d.players.filter(p => p.gold != null);
+        const goldTotal = sharing.reduce((sum, p) => sum + p.gold, 0);
+        const plural = (n, word) => `${fmt(n)} ${word}${n === 1 ? "" : "s"}`;
         const tiles = [
             ["Characters tracked", fmt(t.characters), `${d.players.filter(p => p.level > 1).length} past level 1`],
             ["Levels gained", fmt(t.levels_gained), "across everyone"],
+            ["Time played", played.length ? formatPlayed(playedTotal) : "—",
+                played.length ? `across ${plural(played.length, "character")}` : "no playtime reported yet"],
             ["Quests turned in", fmt(t.quests), `${fmt(t.quest_xp)} XP rewarded · seen by this dashboard`],
             ["XP recorded", fmt(t.xp_recorded), timed ? `${fmt(timed)} events timed` : "no timed events yet"],
             ["Deaths", fmt(t.deaths), t.deaths ? "across everyone" : "nobody has died yet"],
+            ["Gold held", sharing.length ? gs(goldTotal) : "—",
+                sharing.length ? `${fmt(sharing.length)} of ${plural(d.players.length, "character")} sharing` : "nobody has shared gold yet"],
         ];
         document.getElementById("kpis").innerHTML = tiles.map(([label, value, sub]) => `
             <div class="kpi">
@@ -500,57 +539,44 @@
             </details>`;
     }
 
-    function renderVelocity(velocity, history) {
-        const host = document.getElementById("velocity");
-        const names = Object.keys(velocity);
-        if (!names.length) {
-            const why = history.timed_rows
-                ? "Not enough timed events yet — a line needs at least two separate moments."
-                : "No events carry an in-game time yet.";
-            host.innerHTML = `<p class="empty">${why} <b>This chart fills in as people play on addon v2.11.0 or newer</b>, which stamps every event with the game's clock. Events recorded before that upgrade can't appear here.</p>`;
-            return;
-        }
-
-        const series = names.map(name => ({
-            name,
-            points: velocity[name]
-                .map(p => ({ t: Date.parse(p.at), level: p.level }))
-                .sort((a, b) => a.t - b.t),
-        }));
+    // One line per character over the in-game clock, with the leader
+    // highlighted: the chart Race to 60 draws, with the quantity on the y
+    // axis left to the caller so gold (and whatever comes next) can use it.
+    //
+    // series: [{ name, points: [{ t, v }] }] -- t a millisecond time, v the
+    // value, points sorted by t, every series at least two separate moments.
+    // opts: ariaLabel; yMin, the axis floor; yTicks(yMin, yMax) -> values to
+    // grid; yLabel(v) for the axis; shortValue(v) beside a name ("L19");
+    // longValue(v) for the hover title ("level 19"); tipText(v, hours) for
+    // the hover; tableHead, the <th>s after Character; tableCells(last, hrs,
+    // first), the matching <td>s.
+    function renderRace(host, series, opts) {
         const flat = series.flatMap(s => s.points);
         const minT = Math.min(...flat.map(p => p.t));
         const maxT = Math.max(...flat.map(p => p.t));
-        const maxL = Math.max(...flat.map(p => p.level));
+        const maxV = Math.max(...flat.map(p => p.v));
         const spanT = Math.max(1, maxT - minT);
 
-        // Level starts at 1 rather than the lowest observed, so the axis means
-        // the same thing on every run instead of rescaling as people level.
-        const minL = 1;
-        const spanL = Math.max(1, maxL - minL);
+        // The floor is the caller's, not the lowest observed, so the axis
+        // means the same thing on every run instead of rescaling as people play.
+        const minV = opts.yMin;
+        const spanV = Math.max(1, maxV - minV);
 
         const W = 640, H = 260;
         const L = 44, R = W - 96, T = 16, B = H - 42;
         const xScale = d3.scaleTime().domain([minT, maxT]).range([L, R]);
         const x = t => xScale(t);
-        const y = lv => B - ((lv - minL) / spanL) * (B - T);
+        const y = v => B - ((v - minV) / spanV) * (B - T);
 
         // The leader is whoever is highest at the end, ties broken by getting
         // there first -- which is what "leading" means in a race.
         const ranked = [...series].sort((a, b) => {
             const la = a.points[a.points.length - 1], lb = b.points[b.points.length - 1];
-            return lb.level - la.level || la.t - lb.t;
+            return lb.v - la.v || la.t - lb.t;
         });
         const leader = ranked[0].name;
 
-        // Ticks land on round levels (5, 10, 15...) rather than counting up
-        // from 1, which produced 1/6/11/16 -- numerically fine, but nobody
-        // thinks about levels that way.
-        const levelStep = spanL > 24 ? 10 : spanL > 10 ? 5 : 2;
-        const yTicks = [minL];
-        for (let lv = Math.ceil(minL / levelStep) * levelStep; lv <= maxL; lv += levelStep) {
-            if (lv !== minL) yTicks.push(lv);
-        }
-        if (yTicks[yTicks.length - 1] !== maxL) yTicks.push(maxL);
+        const yTicks = opts.yTicks(minV, maxV);
 
         // Time ticks from d3, which picks round intervals (hours, days,
         // weeks) for however long the data actually spans. The old loop
@@ -559,19 +585,19 @@
         const xTicks = spacedTicks(xScale.ticks(tickCount(R - L, 80)), x, 50, L - 30, W);
 
         const grid = [
-            ...yTicks.map(lv => `<line class="grid-line" x1="${L}" y1="${y(lv).toFixed(1)}" x2="${R}" y2="${y(lv).toFixed(1)}"/>
-                 <text class="axis-text" x="${L - 8}" y="${(y(lv) + 4).toFixed(1)}" text-anchor="end">${lv}</text>`),
+            ...yTicks.map(v => `<line class="grid-line" x1="${L}" y1="${y(v).toFixed(1)}" x2="${R}" y2="${y(v).toFixed(1)}"/>
+                 <text class="axis-text" x="${L - 8}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end">${opts.yLabel(v)}</text>`),
             ...xTicks.map(t => `<text class="axis-text" x="${x(t).toFixed(1)}" y="${B + 18}" text-anchor="middle">${timeLabel(t)}</text>`),
         ].join("");
 
         const paths = series.map((s, i) => {
-            const d = s.points.map(p => `${x(p.t).toFixed(1)},${y(p.level).toFixed(1)}`).join(" ");
+            const d = s.points.map(p => `${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
             const isLeader = s.name === leader;
             const last = s.points[s.points.length - 1];
             return `<polyline class="race-line${isLeader ? " leader" : ""}" data-i="${i}" points="${d}"/>
-                    <circle class="race-end" cx="${x(last.t).toFixed(1)}" cy="${y(last.level).toFixed(1)}" r="${isLeader ? 4.5 : 3}"
+                    <circle class="race-end" cx="${x(last.t).toFixed(1)}" cy="${y(last.v).toFixed(1)}" r="${isLeader ? 4.5 : 3}"
                             fill="${isLeader ? "var(--accent-color)" : "var(--neutral-color)"}" data-i="${i}"/>
-                    <polyline class="race-hit" data-i="${i}" points="${d}"><title>${escapeHtml(s.name)} — level ${last.level}</title></polyline>`;
+                    <polyline class="race-hit" data-i="${i}" points="${d}"><title>${escapeHtml(s.name)} — ${opts.longValue(last.v)}</title></polyline>`;
         }).join("");
 
         // Only the leader is labelled on the chart. Labelling seven would
@@ -582,7 +608,7 @@
         // right-aligned above it -- or below, when the leader is already at
         // the top of the chart -- so a long name never runs off an edge.
         // ~6.2 units per character is this font at 11px.
-        const lx = x(leaderLast.t), ly = y(leaderLast.level);
+        const lx = x(leaderLast.t), ly = y(leaderLast.v);
         const fits = lx + 9 + leader.length * 6.2 <= W - 4;
         const ny = ly - 9 >= 12 ? ly - 9 : ly + 17;
         const leaderLabel = fits
@@ -595,7 +621,7 @@
         host.innerHTML = `
             <div class="race-wrap" style="position:relative">
               <div class="chart-scroll">
-                <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Level over time for each character, with the leader highlighted">
+                <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${opts.ariaLabel}">
                     <line class="grid-line" x1="${L}" y1="${B}" x2="${R}" y2="${B}"/>
                     ${grid}${paths}${leaderLabel}
                     <text class="axis-text" x="${L}" y="${H - 6}">${new Date(minT).toLocaleDateString([], { month: "short", day: "numeric" })}</text>
@@ -605,7 +631,7 @@
               <div class="race-names">${ranked.map(s => {
                   const i = series.indexOf(s);
                   const last = s.points[s.points.length - 1];
-                  return `<button type="button" data-i="${i}" class="${s.name === leader ? "leader" : ""}"><span class="dot"></span>${escapeHtml(s.name)} <span style="opacity:.6">L${last.level}</span></button>`;
+                  return `<button type="button" data-i="${i}" class="${s.name === leader ? "leader" : ""}"><span class="dot"></span>${escapeHtml(s.name)} <span style="opacity:.6">${opts.shortValue(last.v)}</span></button>`;
               }).join("")}</div>
             </div>`;
 
@@ -623,7 +649,7 @@
             const s = series[i];
             const last = s.points[s.points.length - 1];
             const hours = Math.round((last.t - s.points[0].t) / 3600000);
-            tip.innerHTML = `<b>${escapeHtml(s.name)}</b><br><span>level ${last.level} after ${hours}h</span>`;
+            tip.innerHTML = `<b>${escapeHtml(s.name)}</b><br><span>${opts.tipText(last.v, hours)}</span>`;
             tip.hidden = false;
             if (event) {
                 const box = wrap.getBoundingClientRect();
@@ -654,16 +680,101 @@
         const table = document.createElement("details");
         table.innerHTML = `<summary>Table view</summary>
             <div class="table-scroll"><table class="data">
-              <thead><tr><th>Character</th><th class="num">Level</th><th class="num">Hours to get there</th><th class="num">Levels/hour</th></tr></thead>
+              <thead><tr><th>Character</th>${opts.tableHead}</tr></thead>
               <tbody>${ranked.map(s => {
                   const last = s.points[s.points.length - 1];
                   const hrs = (last.t - s.points[0].t) / 3600000;
-                  const gained = last.level - s.points[0].level;
-                  return `<tr><td>${escapeHtml(s.name)}</td><td class="num">${last.level}</td>
-                          <td class="num">${hrs.toFixed(1)}</td>
-                          <td class="num">${hrs > 0 ? (gained / hrs).toFixed(2) : "—"}</td></tr>`;
+                  return `<tr><td>${escapeHtml(s.name)}</td>${opts.tableCells(last, hrs, s.points[0])}</tr>`;
               }).join("")}</tbody></table></div>`;
         host.appendChild(table);
+    }
+
+    function renderVelocity(velocity, history) {
+        const host = document.getElementById("velocity");
+        const names = Object.keys(velocity);
+        if (!names.length) {
+            const why = history.timed_rows
+                ? "Not enough timed events yet — a line needs at least two separate moments."
+                : "No events carry an in-game time yet.";
+            host.innerHTML = `<p class="empty">${why} <b>This chart fills in as people play on addon v2.11.0 or newer</b>, which stamps every event with the game's clock. Events recorded before that upgrade can't appear here.</p>`;
+            return;
+        }
+        const series = names.map(name => ({
+            name,
+            points: velocity[name]
+                .map(p => ({ t: Date.parse(p.at), v: p.level }))
+                .sort((a, b) => a.t - b.t),
+        }));
+        renderRace(host, series, {
+            ariaLabel: "Level over time for each character, with the leader highlighted",
+            // Level starts at 1 rather than the lowest observed, so the axis
+            // means the same thing on every run instead of rescaling as people level.
+            yMin: 1,
+            // Ticks land on round levels (5, 10, 15...) rather than counting up
+            // from 1, which produced 1/6/11/16 -- numerically fine, but nobody
+            // thinks about levels that way.
+            yTicks: (minL, maxL) => {
+                const spanL = Math.max(1, maxL - minL);
+                const levelStep = spanL > 24 ? 10 : spanL > 10 ? 5 : 2;
+                const ticks = [minL];
+                for (let lv = Math.ceil(minL / levelStep) * levelStep; lv <= maxL; lv += levelStep) {
+                    if (lv !== minL) ticks.push(lv);
+                }
+                if (ticks[ticks.length - 1] !== maxL) ticks.push(maxL);
+                return ticks;
+            },
+            yLabel: lv => `${lv}`,
+            shortValue: lv => `L${lv}`,
+            longValue: lv => `level ${lv}`,
+            tipText: (lv, hours) => `level ${lv} after ${hours}h`,
+            tableHead: `<th class="num">Level</th><th class="num">Hours to get there</th><th class="num">Levels/hour</th>`,
+            tableCells: (last, hrs, first) => `<td class="num">${last.v}</td>
+                          <td class="num">${hrs.toFixed(1)}</td>
+                          <td class="num">${hrs > 0 ? ((last.v - first.v) / hrs).toFixed(2) : "—"}</td>`,
+        });
+    }
+
+    function renderGold(gold, history) {
+        const host = document.getElementById("gold");
+        // The page is served from disk and can run ahead of a server that
+        // hasn't been restarted; a missing series must not take the panels
+        // below this one down with it.
+        const names = Object.keys(gold || {});
+        if (!names.length) {
+            // Gold rides along on STATUS rows, which the addon sends at login
+            // and on level-up -- so "not enough" means fewer than two of those.
+            const why = history.timed_rows
+                ? "Not enough yet — a line needs two logins or level-ups with gold recorded."
+                : "No gold has been recorded with an in-game time yet.";
+            host.innerHTML = `<p class="empty">${why} <b>This chart fills in as people log in and level on addon v3.0.0 or newer</b>, which reports gold with each of those. Characters keeping their gold private never appear here.</p>`;
+            return;
+        }
+        const series = names.map(name => ({
+            name,
+            points: gold[name]
+                .map(p => ({ t: Date.parse(p.at), v: p.gold }))
+                .sort((a, b) => a.t - b.t),
+        }));
+        renderRace(host, series, {
+            ariaLabel: "Gold over time for each character, with the leader highlighted",
+            yMin: 0,
+            yTicks: (min, max) => {
+                const steps = [100, 500, 1000, 5000, ...[1, 5, 10, 50, 100, 500, 1000].map(g => g * 10000)];  // 1s, 5s, 10s, 50s, then gold
+                const step = steps.find(s => (max - min) / s <= 8) || steps[steps.length - 1];
+                const ticks = [];
+                for (let v = min; v <= max; v += step) ticks.push(v);
+                if (ticks[ticks.length - 1] !== max) ticks.push(max);
+                return ticks;
+            },
+            yLabel: v => gs(v),
+            shortValue: v => gs(v),
+            longValue: v => gs(v),
+            tipText: (v, hours) => `${gs(v)} after ${hours}h`,
+            tableHead: `<th class="num">Gold</th><th class="num">Hours to get there</th><th class="num">Gold/hour</th>`,
+            tableCells: (last, hrs, first) => `<td class="num">${formatGold(last.v)}</td>
+                          <td class="num">${hrs.toFixed(1)}</td>
+                          <td class="num">${hrs > 0 ? `${((last.v - first.v) / 10000 / hrs).toFixed(1)}g` : "—"}</td>`,
+        });
     }
 
     // Two views of the same deaths. Zone answers "what keeps killing people",
@@ -886,20 +997,92 @@
             }).join("")}</tbody>`;
     }
 
+    // --- By character / by player --------------------------------------------
+    // Every record from the server is one character. "By player" folds a
+    // person's characters into one record of the same shape, so the
+    // composition chart and the roster render either without knowing which.
+    // The time charts stay per character: a line for a merged player would
+    // mean nothing. The choice is remembered like the dashboard's view is.
+    let grouping = "character";
+    try { grouping = localStorage.getItem("analyticsGrouping") === "player" ? "player" : "character"; } catch (e) { /* private mode */ }
+    let lastData = null;
+
+    function byPlayer(players) {
+        const groups = new Map();
+        for (const p of players) {
+            // Nobody's character stands alone, under its own name.
+            const key = p.player_id == null ? `solo:${p.name}` : `player:${p.player_id}`;
+            if (!groups.has(key)) groups.set(key, []);
+            groups.get(key).push(p);
+        }
+        const merged = [...groups.values()].map(chars => {
+            if (chars[0].player_id == null) return chars[0];
+            // The main fronts the group: its class, level and progress are what
+            // "how is Jerry doing" means. With no main, the highest character.
+            const lead = chars.find(c => c.name === c.main)
+                || [...chars].sort((a, b) => b.level - a.level || b.pct - a.pct)[0];
+            const latest = [...chars].sort((a, b) => (a.idle_seconds ?? Infinity) - (b.idle_seconds ?? Infinity))[0];
+            const sum = field => chars.reduce((n, c) => n + (c[field] || 0), 0);
+            const any = field => chars.some(c => c[field] != null);
+            // One private purse makes the whole group's gold withheld: a partial
+            // sum would read as the real figure, which is what private prevents.
+            const privateFields = [...new Set(chars.flatMap(c => c.private_fields || []))];
+            return {
+                ...lead,
+                name: chars.length > 1 ? `${lead.player} (${chars.length} characters)` : lead.player,
+                characters: chars.map(c => c.name),
+                total_xp: sum("total_xp"),
+                quest_xp: sum("quest_xp"),
+                other_xp: sum("other_xp"),
+                quests: sum("quests"),
+                quests_completed: any("quests_completed") ? sum("quests_completed") : null,
+                deaths: sum("deaths"),
+                played_total: any("played_total") ? sum("played_total") : null,
+                afk_total: any("afk_total") ? sum("afk_total") : null,
+                gold: privateFields.includes("gold") || !any("gold") ? null : sum("gold"),
+                private_fields: privateFields,
+                professions: chars.flatMap(c => c.professions || []),
+                zone: latest.zone,
+                idle_seconds: latest.idle_seconds,
+            };
+        });
+        return merged.sort((a, b) => b.level - a.level || b.pct - a.pct);
+    }
+
+    function renderGrouped(data) {
+        const players = grouping === "player" ? byPlayer(data.players) : data.players;
+        renderComposition(players);
+        renderRoster(players, data.stale_after_seconds);
+    }
+
+    function setGrouping(mode) {
+        grouping = mode === "player" ? "player" : "character";
+        try { localStorage.setItem("analyticsGrouping", grouping); } catch (e) { /* ignore */ }
+        document.querySelectorAll("[data-grouping]").forEach(b =>
+            b.setAttribute("aria-pressed", String(b.dataset.grouping === grouping)));
+        if (lastData) renderGrouped(lastData);
+    }
+    document.querySelector(".group-switch").addEventListener("click", event => {
+        const button = event.target.closest("[data-grouping]");
+        if (button) setGrouping(button.dataset.grouping);
+    });
+    setGrouping(grouping);
+
     async function load() {
         const statusEl = document.getElementById("status");
         try {
             const response = await fetch(`${API_BASE}/api/analytics`);
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const data = await response.json();
+            lastData = data;
             renderKpis(data);
-            renderComposition(data.players);
+            renderGrouped(data);
             renderBands(data.quest_bands);
             renderGrind(data.level_times, data.velocity);
             renderVelocity(data.velocity, data.history);
+            renderGold(data.gold_over_time, data.history);
             renderActivity(data.activity, data.activity_hours, data.players);
             renderDeaths(data.deaths_by_zone, data.deaths_by_level, data.deaths_without_zone);
-            renderRoster(data.players, data.stale_after_seconds);
             document.getElementById("scope").textContent =
                 `${data.history.rows.toLocaleString()} events recorded`;
             statusEl.textContent = "Up to date";

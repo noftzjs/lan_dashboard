@@ -153,6 +153,33 @@ def test_velocity_needs_two_separate_moments_to_draw_a_line(server):
     assert len(velocity["TwoPoints"]) == 2
 
 
+def test_gold_over_time_is_one_series_per_character_with_two_moments(server):
+    # name,STATUS,<epoch>,level,xp,maxxp,gold,played_total,played_level
+    accepted(server, f"Rich,STATUS,{STAMP},10,100,7600,5000,3600,600")
+    accepted(server, f"Rich,STATUS,{STAMP + 3600},11,200,8800,12000,7200,900")
+    accepted(server, f"Once,STATUS,{STAMP},10,100,7600,300,3600,600")
+    gold = analytics(server)["gold_over_time"]
+    assert "Once" not in gold, "a single point is not a trend"
+    assert gold["Rich"] == [{"at": gold["Rich"][0]["at"], "gold": 5000}, {"at": gold["Rich"][1]["at"], "gold": 12000}]
+    assert gold["Rich"][0]["at"] < gold["Rich"][1]["at"]
+
+
+def test_gold_over_time_skips_xp_rows_and_untimed_status(server):
+    accepted(server, f"Grinder,XP,{STAMP},10,100,7600")
+    accepted(server, f"Grinder,XP,{STAMP + 60},10,900,7600")
+    accepted(server, "Legacy,STATUS,10,100,7600,5000,3600,600")      # pre-2.11.0: no in-game clock
+    accepted(server, "Legacy,STATUS,11,200,8800,9000,7200,900")
+    assert analytics(server)["gold_over_time"] == {}
+
+
+def test_going_private_takes_a_characters_gold_history_off_the_chart(server):
+    accepted(server, f"Shy,STATUS,{STAMP},10,100,7600,5000,3600,600")
+    accepted(server, f"Shy,STATUS,{STAMP + 3600},11,200,8800,12000,7200,900")
+    assert "Shy" in analytics(server)["gold_over_time"]
+    accepted(server, f"Shy,STATUS,{STAMP + 7200},12,300,9900,,10800,1200")   # empty slot: withheld
+    assert "Shy" not in analytics(server)["gold_over_time"]
+
+
 def test_untimed_history_produces_no_velocity_lines(server):
     """Everything recorded before addon v2.11.0 has no in-game clock."""
     accepted(server, "Old,XP,10,100,7600")
@@ -181,3 +208,38 @@ def test_quest_xp_never_exceeds_total_xp(build_server):
     assert ayla["quest_xp"] == 2400
     assert ayla["total_xp"] >= ayla["quest_xp"]
     assert ayla["other_xp"] == ayla["total_xp"] - ayla["quest_xp"]
+
+
+# --- by-player totals: who plays each character ---------------------------------------------
+def send_from(client, name, watcher_id):
+    body = {"timestamp": "t", "data": f"{name},XP,{STAMP},10,100,7600", "watcher_id": watcher_id}
+    assert client.post("/api/log-update", json=body).json()["status"] == "success"
+
+
+def test_analytics_says_who_plays_each_character(server):
+    send_from(server, "Ayla Main", "a" * 32)
+    send_from(server, "Ayla Bank", "a" * 32)
+    accepted(server, f"Loner,XP,{STAMP},10,100,7600")          # no watcher id: nobody's
+    by_name = {p["name"]: p for p in analytics(server)["players"]}
+    assert by_name["Ayla Main"]["player"] == "Ayla Main" and by_name["Ayla Main"]["main"] == "Ayla Main"
+    assert by_name["Ayla Bank"]["player_id"] == by_name["Ayla Main"]["player_id"]
+    assert by_name["Ayla Bank"]["main"] == "Ayla Main"
+    assert by_name["Loner"] | {"player_id": None, "player": None, "main": None} == by_name["Loner"]
+
+
+def test_a_hidden_main_is_not_named_by_the_analytics_page(server):
+    send_from(server, "Ayla Main", "a" * 32)
+    send_from(server, "Ayla Bank", "a" * 32)
+    assert server.post("/api/roster/Ayla Main/hide", auth=ROSTER_AUTH).status_code == 200
+    by_name = {p["name"]: p for p in analytics(server)["players"]}
+    assert "Ayla Main" not in by_name
+    # The player is still named after the hidden character, so the bank alt stands alone.
+    assert by_name["Ayla Bank"]["player"] is None and by_name["Ayla Bank"]["main"] is None
+
+
+def test_a_renamed_player_groups_under_its_own_name(server):
+    send_from(server, "Ayla Main", "a" * 32)
+    send_from(server, "Ayla Bank", "a" * 32)
+    pid = next(p["player_id"] for p in analytics(server)["players"] if p["name"] == "Ayla Main")
+    assert server.post(f"/api/people/{pid}/rename", json={"name": "Jerry"}, auth=ROSTER_AUTH).status_code == 200
+    assert {p["player"] for p in analytics(server)["players"]} == {"Jerry"}

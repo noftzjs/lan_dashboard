@@ -171,6 +171,27 @@ def alt_of(name: str) -> str | None:
         return None
     main = main_of_person(person_of[name])
     return main if main and main != name and is_public(main) else None
+
+
+def person_fields(name: str) -> dict[str, Any]:
+    """Who plays this character, for the analytics page's by-player totals.
+
+    player_id groups a person's characters; player is their display name; main
+    says which character to show the group under. A character nobody has
+    claimed stands alone (all three None), and so does one whose player is
+    named after a hidden character -- the name would give the hidden one away,
+    and alt_of makes the same choice.
+    """
+    person_id = person_of.get(name)
+    if person_id is None:
+        return {"player_id": None, "player": None, "main": None}
+    label = person_names.get(person_id)
+    if label is None or (label in player_states and not is_public(label)):
+        return {"player_id": None, "player": None, "main": None}
+    main = main_of_person(person_id)
+    return {"player_id": person_id, "player": label, "main": main if main and is_public(main) else None}
+
+
 PERSON_NAME_MAX_LENGTH = 40
 
 
@@ -1845,6 +1866,14 @@ async def get_analytics(_user: str = Depends(require_viewer)):
             " WHERE log_type='XP' AND event_time IS NOT NULL ORDER BY event_time"
         ) as cursor:
             timed_rows = await cursor.fetchall()
+        # Gold is sampled on STATUS rows (login and level-up), so a purse over
+        # the weekend is a handful of points, not a tick per loot. A withheld
+        # (private) value is stored as NULL, so it never reaches this series.
+        async with db.execute(
+            "SELECT player, gold, event_time FROM visible_history"
+            " WHERE log_type='STATUS' AND gold IS NOT NULL AND event_time IS NOT NULL ORDER BY event_time"
+        ) as cursor:
+            gold_rows = await cursor.fetchall()
         # Played time at each level-up, which is what makes "how long did that
         # level take" answerable. Wall-clock between level-ups would count
         # sleep: on a LAN weekend that turns an ordinary level into a
@@ -1927,6 +1956,7 @@ async def get_analytics(_user: str = Depends(require_viewer)):
         total = max(gained.get(name, 0), quests_xp)
         players.append({
             "name": name,
+            **person_fields(name),
             "class": state.get("class"),
             "faction": state.get("faction"),
             "guild": state.get("guild"),
@@ -2020,6 +2050,19 @@ async def get_analytics(_user: str = Depends(require_viewer)):
         if len({point["at"] for point in points}) >= 2
     }
 
+    # Gold over time, shaped like velocity: one series per character, two
+    # separate moments minimum. A character whose gold is private *now* drops
+    # out entirely, so going private also takes the earlier points off the chart.
+    gold_private = {p["name"] for p in players if "gold" in p["private_fields"]}
+    gold_over_time: dict[str, list] = {}
+    for row in gold_rows:
+        if row["player"] not in gold_private:
+            gold_over_time.setdefault(row["player"], []).append({"at": row["event_time"], "gold": row["gold"]})
+    gold_over_time = {
+        name: points for name, points in gold_over_time.items()
+        if len({point["at"] for point in points}) >= 2
+    }
+
     return {
         "totals": {
             "characters": len(players),
@@ -2033,6 +2076,7 @@ async def get_analytics(_user: str = Depends(require_viewer)):
         "quest_bands": quest_bands,
         "level_costs": [{"level": row["level"], "xp": row["cost"]} for row in level_rows],
         "velocity": velocity,
+        "gold_over_time": gold_over_time,
         "level_times": level_times,
         "activity": activity,
         "activity_hours": sorted(activity_hours),

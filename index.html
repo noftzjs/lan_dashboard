@@ -335,7 +335,9 @@
 </div>
 
 <script src="/static/vendor/morphdom-umd.min.js"></script>
-<script src="/static/dashboard.js"></script>
+<!-- Bump the version when dashboard.js changes: the server sends no cache
+     headers, so without it a browser can keep an old copy after a deploy. -->
+<script src="/static/dashboard.js?v=20261009"></script>
 <script>
     // Stream link / tags are edited on the Roster Manager page only — this
     // view is read-only display, which also means no input fields here can
