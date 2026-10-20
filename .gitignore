@@ -56,3 +56,6 @@ BACKLOG.md
 
 # Local load-test tool: writes fake characters to whatever server it targets.
 loadtest.py
+
+# One-off beta report and its generator: name real players, kept local.
+beta_report.*

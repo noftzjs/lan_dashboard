@@ -44,6 +44,12 @@
         }
         .flow-step b { display: block; color: var(--accent-color); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 2px; }
         .flow-arrow { align-self: center; color: var(--text-muted); }
+        /* Where the code lives, for anyone who wants to read what they are
+           installing before they install it. One quiet line under the
+           downloads; the links do the work. */
+        .source { font-size: 13px; color: var(--text-muted); margin: 12px 0 0; }
+        .source a { color: var(--text-color); }
+        .source a:hover { color: var(--accent-color); }
 
         /* Steps: a real sequence, so numbering is information here */
         .step { display: grid; grid-template-columns: 40px 1fr; gap: 14px; padding: 26px 0; border-top: 1px solid var(--card-color); }
@@ -133,6 +139,13 @@
         <div class="flow-arrow" aria-hidden="true">&rarr;</div>
         <div class="flow-step"><b>Dashboard</b>Updates live for everyone watching</div>
     </div>
+
+    <p class="source">Want to read what you're installing? Both pieces are open source under the MIT licence:
+        the <a href="https://github.com/noftzjs/4L_addon" rel="noopener">addon on GitHub</a>
+        and the <a href="https://github.com/noftzjs/lan_dashboard_watcher" rel="noopener">watcher on GitHub</a>.
+        <!-- CurseForge: once the project is approved, put its URL in href and remove `hidden`. -->
+        <span id="curseLink" hidden>The addon is also listed on <a href="" rel="noopener">CurseForge</a>.</span>
+    </p>
 
     <section class="step">
         <div class="step-num">1</div>
