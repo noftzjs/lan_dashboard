@@ -1700,15 +1700,23 @@ def download_watcher():
 BUNDLE_README = """LAN Dashboard Watcher
 =====================
 
-1. In WoW, log in and click "Sync LAN Dashboard" (or type /reload) once, so the
-   addon saves its data file. The watcher can't find anything before that.
+1. Keep this folder together: the .exe, its config file and the files it
+   creates all live here. Put the folder anywhere you like.
 2. Double-click savedvars_watcher.exe. No window opens -- it runs in your system
    tray (bottom-right of the taskbar; click the ^ arrow if you don't see it).
-3. Right-click the tray icon for status, to open the dashboard or the log, or to quit.
+3. In WoW, log in and click "Sync LAN Dashboard" when it appears. The watcher
+   waits for that first save, then picks it up on its own.
+4. Right-click the tray icon for status, to open the dashboard or the log, or to quit.
 
-Keep savedvars_watcher_config.json in the same folder as the .exe. It holds this
-dashboard's address and access token, so don't post it anywhere public.
+savedvars_watcher_config.json holds this dashboard's address and access token,
+so don't post it anywhere public.
 """
+
+# The zip carries one top-level folder, so however it is extracted (Extract
+# All, Extract Here, or dragging out of the zip window) the .exe, its config
+# and everything the watcher writes next to itself stay together. A flat zip
+# let one tester end up with the .exe on its own.
+BUNDLE_FOLDER = "LanDashboardWatcher"
 
 
 class BundleRequest(BaseModel):
@@ -1740,9 +1748,9 @@ def _bundle_response(request: Request) -> Response:
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         # The .exe is already compressed inside; storing it avoids burning CPU
         # for no size win on every download.
-        archive.write(WATCHER_EXE, arcname="savedvars_watcher.exe", compress_type=zipfile.ZIP_STORED)
-        archive.writestr("savedvars_watcher_config.json", json.dumps(config, indent=2) + "\n")
-        archive.writestr("README.txt", BUNDLE_README)
+        archive.write(WATCHER_EXE, arcname=f"{BUNDLE_FOLDER}/savedvars_watcher.exe", compress_type=zipfile.ZIP_STORED)
+        archive.writestr(f"{BUNDLE_FOLDER}/savedvars_watcher_config.json", json.dumps(config, indent=2) + "\n")
+        archive.writestr(f"{BUNDLE_FOLDER}/README.txt", BUNDLE_README)
     return Response(
         content=buffer.getvalue(),
         media_type="application/zip",

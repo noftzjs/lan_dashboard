@@ -143,12 +143,14 @@ def test_the_bundle_carries_a_ready_made_config(build_server, monkeypatch, tmp_p
     response = client.post("/api/watcher-bundle", json={"passphrase": f"  {PASSPHRASE}  "})
     assert response.status_code == 200
     archive = zipfile.ZipFile(io.BytesIO(response.content))
-    assert sorted(archive.namelist()) == ["README.txt", "savedvars_watcher.exe",
-                                          "savedvars_watcher_config.json"]
-    config = json.loads(archive.read("savedvars_watcher_config.json"))
+    # One top-level folder, so every way of extracting keeps the files together.
+    assert sorted(archive.namelist()) == ["LanDashboardWatcher/README.txt",
+                                          "LanDashboardWatcher/savedvars_watcher.exe",
+                                          "LanDashboardWatcher/savedvars_watcher_config.json"]
+    config = json.loads(archive.read("LanDashboardWatcher/savedvars_watcher_config.json"))
     assert config["server_url"] == "https://4l.example.net/api/log-update"
     assert config["ingestion_token"] == "s3cret"
-    assert archive.read("savedvars_watcher.exe") == b"MZ fake binary"
+    assert archive.read("LanDashboardWatcher/savedvars_watcher.exe") == b"MZ fake binary"
 
 
 def test_the_bundle_url_follows_the_proxy_headers_when_public_url_is_unset(build_server, monkeypatch, tmp_path):
@@ -162,7 +164,7 @@ def test_the_bundle_url_follows_the_proxy_headers_when_public_url_is_unset(build
     response = client.post("/api/watcher-bundle", json={"passphrase": PASSPHRASE},
                            headers={"Host": "4l.example.net", "X-Forwarded-Proto": "https"})
     config = json.loads(zipfile.ZipFile(io.BytesIO(response.content))
-                        .read("savedvars_watcher_config.json"))
+                        .read("LanDashboardWatcher/savedvars_watcher_config.json"))
     assert config["server_url"] == "https://4l.example.net/api/log-update"
 
 
@@ -213,7 +215,7 @@ def test_the_link_downloads_the_same_bundle(bundle_server):
     download = client.get(url)
     assert download.status_code == 200
     assert download.headers["content-disposition"].startswith("attachment")
-    config = json.loads(zipfile.ZipFile(io.BytesIO(download.content)).read("savedvars_watcher_config.json"))
+    config = json.loads(zipfile.ZipFile(io.BytesIO(download.content)).read("LanDashboardWatcher/savedvars_watcher_config.json"))
     assert config["ingestion_token"] == "s3cret"
 
 
