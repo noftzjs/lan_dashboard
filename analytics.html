@@ -57,7 +57,9 @@
            the roster together, so the two can never disagree. */
         .group-switch { display: flex; align-items: center; gap: 6px; margin: 0 0 14px; }
         .group-switch-label { font-size: 12px; color: var(--text-muted); margin-right: 4px; }
-        .group-switch .nav-link[aria-pressed="true"] { color: var(--accent-color); border-color: var(--accent-color); }
+        /* The pressed one is styled like the current page in the navbar:
+           plain text on a card, against accent-coloured neighbours. */
+        .group-switch .nav-link[aria-pressed="true"] { color: var(--text-color); background-color: var(--card-color); border-color: var(--text-dim); }
         .who { display: flex; align-items: center; gap: 7px; min-width: 0; }
         .chip { width: 9px; height: 9px; border-radius: 2px; flex: none; }
         .who .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

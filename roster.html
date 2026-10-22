@@ -146,7 +146,7 @@
         .verdict.no { color: var(--live-color); background-color: rgba(230, 57, 79, 0.14); }
         #trafficList tr.refused td { background-color: rgba(230, 57, 79, 0.05); }
         #trafficList .reason { color: var(--live-color); font-size: 12px; margin-top: 3px; }
-        #trafficList .via { color: var(--text-dim); font-family: ui-monospace, Consolas, monospace; font-size: 11px; margin-top: 2px; }
+        #trafficList .via, #peopleList .via { color: var(--text-dim); font-family: ui-monospace, Consolas, monospace; font-size: 11px; margin-top: 2px; }
         /* A new row flashes briefly so a live arrival is noticeable without
            animating the whole list; skipped for anyone who asked for less motion. */
         @keyframes arrive { from { background-color: rgba(243, 167, 60, 0.18); } to { background-color: transparent; } }
@@ -491,8 +491,19 @@
             ...(m.tags || []).map(t => `<span class="tag-chip">${escapeHtml(t)}</span>`),
             m.hidden ? `<span class="flag">hidden</span>` : "",
         ].join(" ");
-        return `<td><span style="color:${colour};font-weight:600">${escapeHtml(m.name)}</span> ${flags}</td>
+        const build = buildText(m);
+        return `<td><span style="color:${colour};font-weight:600">${escapeHtml(m.name)}</span> ${flags}${
+                    build ? `<div class="via">${build.replace(/^ · /, "")}</div>` : ""}</td>
                 <td class="lvl">${m.level ?? "\u2014"}</td>`;
+    }
+
+    // "watcher 1.1.0 · addon 3.10.1", or what is known of it. Older builds
+    // report nothing, which is itself the answer: they need updating.
+    function buildText(source) {
+        const parts = [];
+        if (source.watcher_version) parts.push(`watcher ${escapeHtml(source.watcher_version)}`);
+        if (source.addon_version) parts.push(`addon ${escapeHtml(source.addon_version)}`);
+        return parts.length ? ` · ${parts.join(" · ")}` : "";
     }
 
     // Where a character can go: any other player, or out on its own.
@@ -726,7 +737,7 @@
                     <td class="when">${time(e.at)}</td>
                     <td><span class="verdict ${e.accepted ? "ok" : "no"}">${e.accepted ? "Accepted" : "Refused"}</span></td>
                     <td>${escapeHtml(e.player || "\u2014")}${e.watcher_id
-                        ? `<div class="via" title="Watcher install ${escapeHtml(e.watcher_id)}">via ${escapeHtml(e.watcher_id.slice(0, 8))}</div>` : ""}</td>
+                        ? `<div class="via" title="Watcher install ${escapeHtml(e.watcher_id)}">via ${escapeHtml(e.watcher_id.slice(0, 8))}${buildText(e)}</div>` : ""}</td>
                     <td>${escapeHtml(e.log_type || "\u2014")}</td>
                     <td class="payload">${escapeHtml(e.payload)}${e.truncated ? "\u2026" : ""}
                         ${e.detail ? `<div class="reason">${escapeHtml(e.detail)}</div>` : ""}</td>

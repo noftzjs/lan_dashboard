@@ -1,4 +1,7 @@
 local LanFrame = CreateFrame("Frame")
+-- One place for the version. It is also written into SavedVariables so the
+-- watcher can tell the server which build this is.
+local LDB_VERSION = "3.10.1"
 
 -- Register the updated set of event hooks
 LanFrame:RegisterEvent("PLAYER_XP_UPDATE")
@@ -28,6 +31,11 @@ pcall(function() LanFrame:RegisterEvent("PLAYER_LOGOUT") end)
 
 -- Internal memory to check if data changed before spamming the chat log
 local currentZone = ""
+-- The last level and XP actually recorded this session. PLAYER_XP_UPDATE can
+-- fire twice for one gain on this client (the rested bonus and the bar
+-- refresh arrive a frame apart), and the second firing reads the same
+-- values; recording it again would only duplicate the line.
+local lastXPLevel, lastXPValue = nil, nil
 
 --============================================================
 -- EVENT QUEUE (SavedVariables)
@@ -66,6 +74,7 @@ function LDB_ApplySavedDefaults()
     LanDashboardDB.known = LanDashboardDB.known or {}
     LanDashboardDB.private = LanDashboardDB.private or {}
     LanDashboardDB.defaults = LanDashboardDB.defaults or {}
+    LanDashboardDB.version = LDB_VERSION
 
     -- Sharing gold is opt-in rather than opt-out: it is the one figure testers
     -- actually asked to keep private, so the safe state is the default and a
@@ -582,6 +591,9 @@ LanFrame:SetScript("OnEvent", function(self, event, ...)
         local currentLevel = UnitLevel("player")
 
         if currentXP == 0 and currentLevel == 1 then return end
+        -- Nothing moved since the last firing: a repeat, not a gain.
+        if currentLevel == lastXPLevel and currentXP == lastXPValue then return end
+        lastXPLevel, lastXPValue = currentLevel, currentXP
 
         emit(playerName, "XP", string.format("%d,%d,%d", currentLevel, currentXP, maxXP))
 
@@ -614,6 +626,8 @@ LanFrame:SetScript("OnEvent", function(self, event, ...)
         local newLevel = ...
         local maxXP = UnitXPMax("player")
         emit(playerName, "XP", string.format("%d,0,%d", newLevel, maxXP))
+        -- So the PLAYER_XP_UPDATE that follows a ding is not recorded twice.
+        lastXPLevel, lastXPValue = newLevel, 0
         addScore(LDB_WEIGHT_LEVEL, "level up")
         -- The per-level timer restarts here, and gold has usually moved too.
         requestStatus(playerName)
@@ -1017,7 +1031,7 @@ local function probeStatistics()
 end
 
 local function runProbe()
-    local report = { addon = "3.10.0" }
+    local report = { addon = LDB_VERSION }
     report.when = (date and date("%Y-%m-%d %H:%M:%S")) or tostring(time and time() or "?")
 
     local okBuild, version, build, buildDate, tocVersion = pcall(GetBuildInfo)
@@ -1211,7 +1225,7 @@ local function buildConfigFrame()
 
     local version = f:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
     version:SetPoint("LEFT", title, "RIGHT", 6, -1)
-    version:SetText("v3.10.0")
+    version:SetText("v" .. LDB_VERSION)
 
     local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -2, -2)
@@ -1433,4 +1447,4 @@ SlashCmdList["LANDASHBOARD"] = function(msg)
     ))
 end
 
-print("|cffcd7f32LAN Dashboard v3.10.0 loaded. Type /ldb to open settings.|r")
+print("|cffcd7f32LAN Dashboard v" .. LDB_VERSION .. " loaded. Type /ldb to open settings.|r")

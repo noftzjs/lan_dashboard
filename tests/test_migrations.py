@@ -161,3 +161,28 @@ def test_an_empty_database_is_created_from_scratch(build_server, tmp_path):
     assert {"last_activity", "class"} <= columns(db, "player_snapshots")
     assert {"stream_urls", "tags"} <= columns(db, "player_roster_meta")
     assert client.get("/api/leaderboard").json() == []
+
+
+def test_character_sources_gains_the_version_columns(build_server, tmp_path):
+    """A database from the beta has character_sources without the build
+    columns; the upgrade adds them and keeps the rows."""
+    db = tmp_path / "legacy.db"
+    make_legacy_db(db)
+    connection = sqlite3.connect(db)
+    connection.executescript("""
+        CREATE TABLE character_sources (
+            player TEXT NOT NULL, watcher_id TEXT NOT NULL DEFAULT '',
+            account_id TEXT NOT NULL DEFAULT '', first_seen TEXT, last_seen TEXT,
+            events INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (player, watcher_id, account_id)
+        );
+        INSERT INTO character_sources VALUES ('Sentinel', 'abc', 'def', '2026-09-01', '2026-09-02', 9);
+    """)
+    connection.commit()
+    connection.close()
+
+    build_server(DB_FILE=str(db))
+
+    connection = sqlite3.connect(db)
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(character_sources)")}
+    assert {"watcher_version", "addon_version"} <= columns
+    assert connection.execute("SELECT events, watcher_version FROM character_sources").fetchone() == (9, None)

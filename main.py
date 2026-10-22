@@ -281,8 +281,23 @@ def clean_source_id(value) -> str | None:
     return value if SOURCE_ID_RE.fullmatch(value) else None
 
 
+# Watcher (1.1.0+) and addon (3.10.1+) versions ride along with every event,
+# so the operator can see who is on an old build instead of guessing from
+# what their data looks like. Free text from a client, so only a short plain
+# token is kept; anything else counts as absent.
+VERSION_RE = re.compile(r"[0-9A-Za-z.\-+]{1,20}")
+
+
+def clean_version(value) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value if VERSION_RE.fullmatch(value) else None
+
+
 def record_traffic(accepted: bool, payload: str, detail: str | None = None,
-                   watcher_id: str | None = None, account_id: str | None = None) -> dict:
+                   watcher_id: str | None = None, account_id: str | None = None,
+                   watcher_version: str | None = None, addon_version: str | None = None) -> dict:
     """Adds one entry and returns it, so the caller can broadcast the same dict."""
     player, comma, rest = payload.partition(",")
     log_type, _, _ = rest.partition(",")
@@ -305,6 +320,8 @@ def record_traffic(accepted: bool, payload: str, detail: str | None = None,
         # showing" reports once more than one PC is involved.
         "watcher_id": clean_source_id(watcher_id),
         "account_id": clean_source_id(account_id),
+        "watcher_version": clean_version(watcher_version),
+        "addon_version": clean_version(addon_version),
     }
     _traffic.append(entry)
     return entry
@@ -618,6 +635,15 @@ async def startup_event():
             )
         """)
 
+        # Which builds each source runs (watcher 1.1.0+, addon 3.10.1+).
+        # Older watchers send neither and leave these NULL.
+        cursor = await db.execute("PRAGMA table_info(character_sources)")
+        source_columns = {row[1] for row in await cursor.fetchall()}
+        if "watcher_version" not in source_columns:
+            await db.execute("ALTER TABLE character_sources ADD COLUMN watcher_version TEXT")
+        if "addon_version" not in source_columns:
+            await db.execute("ALTER TABLE character_sources ADD COLUMN addon_version TEXT")
+
         # Players: the people behind the characters. A character is assigned
         # to one the first time it arrives with a watcher or account id --
         # joining whoever already owns that account, else that install, else
@@ -865,6 +891,9 @@ class LogPayload(BaseModel):
     # Sent by watchers from 2026-09-26 on; see clean_source_id.
     watcher_id: str | None = None
     account_id: str | None = None
+    # Sent by watcher 1.1.0+ / addon 3.10.1+; see clean_version.
+    watcher_version: str | None = None
+    addon_version: str | None = None
 
 class RosterMetaPayload(BaseModel):
     # Fields left as None are unchanged; send "" / [] explicitly to clear one.
@@ -1068,6 +1097,8 @@ async def close_ingest_db():
 async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_ingestion_token)):
     watcher_id = clean_source_id(payload.watcher_id)
     account_id = clean_source_id(payload.account_id)
+    watcher_version = clean_version(payload.watcher_version)
+    addon_version = clean_version(payload.addon_version)
     try:
         # Only split off the player name and log type here — the remainder is
         # split per-type below so free-text fields (guild/zone names) can
@@ -1384,13 +1415,18 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                     """, (player_name, json.dumps(new_tags), datetime.now().isoformat()))
 
             if watcher_id or account_id:
+                # Versions: the latest reported wins, and an older watcher that
+                # reports none leaves the last known value in place.
                 await db.execute("""
-                    INSERT INTO character_sources (player, watcher_id, account_id, first_seen, last_seen, events)
-                    VALUES (?, ?, ?, ?, ?, 1)
+                    INSERT INTO character_sources
+                        (player, watcher_id, account_id, first_seen, last_seen, events, watcher_version, addon_version)
+                    VALUES (?, ?, ?, ?, ?, 1, ?, ?)
                     ON CONFLICT(player, watcher_id, account_id) DO UPDATE SET
-                        last_seen=excluded.last_seen, events=events + 1
+                        last_seen=excluded.last_seen, events=events + 1,
+                        watcher_version=COALESCE(excluded.watcher_version, watcher_version),
+                        addon_version=COALESCE(excluded.addon_version, addon_version)
                 """, (player_name, watcher_id or "", account_id or "",
-                      state["last_activity"], state["last_activity"]))
+                      state["last_activity"], state["last_activity"], watcher_version, addon_version))
 
             await db.commit()
 
@@ -1409,7 +1445,8 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
         # Broadcast the data out live to viewers
         await broadcast_player(player_name)
 
-        await broadcast_traffic(record_traffic(True, payload.data, None, watcher_id, account_id))
+        await broadcast_traffic(record_traffic(True, payload.data, None, watcher_id, account_id,
+                                               watcher_version, addon_version))
         return {"status": "success"}
     except sqlite3.OperationalError as e:
         # The database was busy or briefly unavailable. That says nothing
@@ -1418,14 +1455,16 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
         # again on its next poll -- which every watcher version already does.
         logger.warning("Database unavailable for log-update (%s); asked the watcher to retry", e)
         await broadcast_traffic(record_traffic(
-            False, payload.data, f"Database busy -- watcher will retry ({e})", watcher_id, account_id))
+            False, payload.data, f"Database busy -- watcher will retry ({e})", watcher_id, account_id,
+            watcher_version, addon_version))
         return JSONResponse({"status": "retry", "detail": "Database busy, try again"}, status_code=503)
     except Exception as e:
         logger.exception("Failed to process log-update payload: %r", payload.data)
         # Refusals matter more than acceptances here. A rejected event is gone
         # for good -- the watcher's sent_count has already moved past it -- so
         # this is the only place it is ever visible as it happens.
-        await broadcast_traffic(record_traffic(False, payload.data, str(e), watcher_id, account_id))
+        await broadcast_traffic(record_traffic(False, payload.data, str(e), watcher_id, account_id,
+                                               watcher_version, addon_version))
         return {"status": "error", "detail": str(e)}
 
 async def broadcast_player(name: str):
@@ -2361,14 +2400,24 @@ async def get_people(_user: str = Depends(require_operator)):
     async with aiosqlite.connect(DB_FILE) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            "SELECT player, watcher_id, account_id, first_seen, last_seen, events FROM character_sources")
+            "SELECT player, watcher_id, account_id, first_seen, last_seen, events,"
+            " watcher_version, addon_version FROM character_sources ORDER BY last_seen")
         sources = [dict(r) for r in await cursor.fetchall()]
+
+    # The build each character was last seen on. Ordered by last_seen above,
+    # so a later row overwrites an earlier one.
+    versions: dict[str, dict] = {}
+    for row in sources:
+        if row["watcher_version"] or row["addon_version"]:
+            versions[row["player"]] = {"watcher_version": row["watcher_version"],
+                                       "addon_version": row["addon_version"]}
 
     def member(name: str) -> dict:
         state = player_states.get(name) or {}
         return {"name": name, "level": state.get("level"), "class": state.get("class"),
                 "faction": state.get("faction"), "tags": state.get("tags") or [],
-                "hidden": name in hidden_players}
+                "hidden": name in hidden_players,
+                **versions.get(name, {"watcher_version": None, "addon_version": None})}
 
     people = {pid: {"id": pid, "name": pname, "characters": [], "watcher_ids": set(), "account_ids": set(),
                     "first_seen": None, "last_seen": None, "events": 0}

@@ -4,6 +4,7 @@ player says otherwise -- and waits long enough not to re-send duplicates.
 The registry is never touched here: set_startup is replaced, so these tests
 only check the decisions, not Windows.
 """
+import os
 import sys
 
 import pytest
@@ -75,3 +76,80 @@ def test_the_watcher_waits_long_enough_to_avoid_duplicates():
     finally:
         watcher.SESSION = original
     assert captured["timeout"] >= 10
+
+
+# --- a newer download replaces an older watcher that is still running ------------
+# An old watcher that auto-starts with Windows holds the single-instance lock,
+# so the new download a player just double-clicked would be refused and the
+# old one would carry on. A watcher from a *different folder* is replaced; the
+# same exe started twice is still a double-click and still refused.
+
+OWN = r"C:\Users\me\Desktop\LanDashboardWatcher\savedvars_watcher.exe"
+
+
+def test_a_watcher_from_another_folder_is_replaced():
+    running = [(100, r"C:\Users\me\Downloads\LanDashboardWatcher\savedvars_watcher.exe"),
+               (101, r"C:\Users\me\Downloads\LanDashboardWatcher\savedvars_watcher.exe")]  # loader + child
+    assert [pid for pid, _ in watcher.installs_to_replace(OWN, running)] == [100, 101]
+
+
+def test_the_same_exe_started_twice_is_not_replaced():
+    """Our own onefile loader has our path too, so this also keeps it safe."""
+    running = [(100, OWN), (101, OWN.lower()), (102, OWN.replace("\\", "/"))]
+    assert watcher.installs_to_replace(OWN, running) == []
+
+
+def test_nothing_running_means_nothing_to_replace():
+    assert watcher.installs_to_replace(OWN, []) == []
+
+
+@pytest.fixture
+def lock_held_by(monkeypatch, tmp_path):
+    """Fakes the Windows pieces: who is running, whether the lock frees once
+    they are gone, and the kill itself."""
+    monkeypatch.setattr(watcher, "LOG_PATH", str(tmp_path / "log.txt"))
+    monkeypatch.setattr(watcher, "ERROR_LOG", str(tmp_path / "errors.txt"))
+    monkeypatch.setattr(watcher.sys, "executable", OWN, raising=False)
+    monkeypatch.setattr(watcher.time, "sleep", lambda _s: None)
+    killed = []
+
+    def arrange(running):
+        alive = {pid for pid, _ in running}
+
+        def kill(pid):
+            killed.append(pid)
+            alive.discard(pid)
+            return True
+
+        def lock_is_free():
+            # The lock frees only once every other install is gone.
+            return not any(os.path.normcase(p) != os.path.normcase(OWN) for pid, p in running if pid in alive)
+
+        monkeypatch.setattr(watcher, "running_watchers", lambda: list(running))
+        monkeypatch.setattr(watcher, "terminate_process", kill)
+        monkeypatch.setattr(watcher, "release_single_instance", lambda: None)
+        monkeypatch.setattr(watcher, "acquire_single_instance", lock_is_free)
+        return killed
+    return arrange
+
+
+def test_the_old_install_is_ended_and_the_lock_taken(lock_held_by):
+    old = r"C:\Users\me\Downloads\LanDashboardWatcher\savedvars_watcher.exe"
+    killed = lock_held_by([(100, old), (101, old)])
+    assert watcher.take_over_from_other_install() is True
+    assert killed == [100, 101]
+
+
+def test_a_double_click_of_the_same_exe_is_left_alone(lock_held_by):
+    killed = lock_held_by([(100, OWN), (101, OWN)])
+    assert watcher.take_over_from_other_install() is False
+    assert killed == []
+
+
+def test_an_install_that_will_not_die_does_not_hang_forever(lock_held_by, monkeypatch):
+    old = r"C:\Users\me\Downloads\LanDashboardWatcher\savedvars_watcher.exe"
+    lock_held_by([(100, old)])
+    monkeypatch.setattr(watcher, "terminate_process", lambda _pid: False)
+    clock = iter(range(0, 100))
+    monkeypatch.setattr(watcher.time, "monotonic", lambda: next(clock))
+    assert watcher.take_over_from_other_install() is False

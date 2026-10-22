@@ -115,6 +115,43 @@ def test_the_server_links_what_the_watcher_sends(build_server, tmp_path, monkeyp
     assert person["account_ids"] == [source["account_id"]]
 
 
+def test_the_server_records_which_builds_sent_it(build_server, tmp_path, monkeypatch):
+    """Watcher version always, addon version when the file carries one, so
+    the Traffic and Players tabs can say who needs updating."""
+    _, client = build_server()
+    monkeypatch.setattr(watcher, "SESSION", ThroughTestClient(client))
+    source = {"watcher_id": watcher.load_watcher_id(str(tmp_path / "id")),
+              "account_id": watcher.account_id_for(REAL_PATH), "addon_version": "3.10.1"}
+
+    watcher.send_packet("unused", f"Cyklades Usa,ZONE,{STAMP},Ironforge", source=source)
+
+    entry = client.get("/api/traffic", auth=ROSTER_AUTH).json()["entries"][-1]
+    assert entry["watcher_version"] == watcher.WATCHER_VERSION
+    assert entry["addon_version"] == "3.10.1"
+    (person,) = client.get("/api/people", auth=ROSTER_AUTH).json()["people"]
+    (member,) = person["members"]
+    assert (member["watcher_version"], member["addon_version"]) == (watcher.WATCHER_VERSION, "3.10.1")
+
+
+def test_an_older_watcher_leaves_the_last_known_build_in_place(build_server, tmp_path, monkeypatch):
+    """A later event with no versions (or an unusable one) must not wipe
+    what a newer build already reported for the same source."""
+    _, client = build_server()
+    monkeypatch.setattr(watcher, "SESSION", ThroughTestClient(client))
+    ids = {"watcher_id": watcher.load_watcher_id(str(tmp_path / "id")),
+           "account_id": watcher.account_id_for(REAL_PATH)}
+
+    watcher.send_packet("unused", f"Cyklades Usa,ZONE,{STAMP},Ironforge", source={**ids, "addon_version": "3.10.1"})
+    client.post("/api/log-update", json={"timestamp": "t", "data": f"Cyklades Usa,ZONE,{STAMP + 1},Orgrimmar",
+                                         **ids, "watcher_version": "<script>", "addon_version": None})
+
+    entry = client.get("/api/traffic", auth=ROSTER_AUTH).json()["entries"][-1]
+    assert entry["watcher_version"] is None
+    (person,) = client.get("/api/people", auth=ROSTER_AUTH).json()["people"]
+    (member,) = person["members"]
+    assert (member["watcher_version"], member["addon_version"]) == (watcher.WATCHER_VERSION, "3.10.1")
+
+
 def test_sending_without_ids_still_works(build_server, monkeypatch):
     """No source at all -- e.g. no account folder in the path -- must not
     break delivery or send empty fields."""

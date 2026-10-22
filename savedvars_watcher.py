@@ -100,6 +100,9 @@ SINGLE_INSTANCE_MUTEX = "Local\\LanDashboardWatcher"
 # How often tray mode re-scans the drives while it hasn't found the addon's
 # save file yet. Not every poll: the scan touches every drive letter.
 DISCOVERY_SCAN_SECONDS = 30
+# Sent with every event, so the Traffic tab can show who runs which build.
+# Bump it with every rebuild of the .exe.
+WATCHER_VERSION = "1.1.0"
 
 # Matches each quoted Lua string literal in order. WoW serializes a plain
 # sequential array (our events table) as bare quoted strings one per line —
@@ -184,6 +187,36 @@ def most_recently_used(paths):
         except OSError:
             return 0
     return max(paths, key=mtime)
+
+
+def looks_like_savedvars(path):
+    """True for a path inside a SavedVariables folder. The addon's own code
+    file is also called LanDashboard.lua and lives under Interface\\AddOns;
+    a player picking that one in the tray's file dialog got a watcher that
+    forwarded nothing, and a config pinned to it would stay that way."""
+    parts = [part.lower() for part in re.split(r"[\\/]+", path or "")]
+    return "savedvariables" in parts
+
+
+def newer_sibling(current, candidates):
+    """Among the discovered files, the one that changed most recently -- if
+    it is a different file from `current` and strictly newer. None while the
+    watched file is still the live one.
+
+    This is how a watcher follows the player when the game moves: a watcher
+    that auto-started with Windows during the beta kept watching
+    _classic_beta_'s file after the client moved to _forever_, and sat there
+    green and connected forwarding nothing."""
+    norm = os.path.normcase
+    others = [path for path in candidates if norm(path) != norm(current)]
+    if not others:
+        return None
+    best = most_recently_used(others)
+    try:
+        current_mtime = os.path.getmtime(current) if os.path.exists(current) else 0
+        return best if os.path.getmtime(best) > current_mtime else None
+    except OSError:
+        return None
 
 
 class ConfigError(Exception):
@@ -286,10 +319,36 @@ def load_config(args, interactive):
 
 
 def load_state():
+    """Delivery position per SavedVariables file. The top-level sent_count and
+    last_sent belong to the file being watched (`path`); `files` keeps the
+    position of every file seen, so switching between installs or accounts
+    never re-sends a queue that was already delivered."""
+    state = {"sent_count": 0, "last_sent": None, "path": None, "files": {}}
     if os.path.exists(STATE_PATH):
         with open(STATE_PATH, encoding="utf-8") as f:
-            return json.load(f)
-    return {"sent_count": 0, "last_sent": None}
+            state.update(json.load(f))
+    if not isinstance(state.get("files"), dict):
+        state["files"] = {}
+    return state
+
+
+def switch_state_to(state, new_path):
+    """Park the current file's position and bring up new_path's. Returns True
+    when that was a change of file worth announcing."""
+    old = state.get("path")
+    if old == new_path:
+        return False
+    if old is None:
+        # A state file from before positions were kept per file: its counters
+        # belong to whatever file is being watched now.
+        state["path"] = new_path
+        return False
+    state["files"][old] = {"sent_count": state["sent_count"], "last_sent": state["last_sent"]}
+    saved = state["files"].get(new_path) or {}
+    state["sent_count"] = int(saved.get("sent_count", 0))
+    state["last_sent"] = saved.get("last_sent")
+    state["path"] = new_path
+    return True
 
 
 def save_state(state):
@@ -422,6 +481,16 @@ def is_well_formed(payload):
     return len(parts) >= minimum
 
 
+ADDON_VERSION_RE = re.compile(r'\["version"\]\s*=\s*"([0-9A-Za-z.\-]{1,20})"')
+
+
+def parse_addon_version(file_text):
+    """The addon writes its version into SavedVariables (3.10.1+), so the
+    server can tell who is on an old build. None for older addons."""
+    match = ADDON_VERSION_RE.search(file_text)
+    return match.group(1) if match else None
+
+
 def backup_to_csv(payload):
     timestamp = datetime.now().isoformat()
     with open(BACKUP_CSV, "a", encoding="utf-8") as f:
@@ -451,11 +520,14 @@ SEND_TIMEOUT_SECONDS = 10.0
 
 
 def send_packet(server_url, payload, ingestion_token=None, timeout=SEND_TIMEOUT_SECONDS, source=None):
-    body = {"timestamp": datetime.now().isoformat(), "data": payload}
-    # watcher_id / account_id. Extra body fields are ignored by a server
-    # older than this, so a new watcher is safe against an old deployment.
+    body = {"timestamp": datetime.now().isoformat(), "data": payload, "watcher_version": WATCHER_VERSION}
+    # watcher_id / account_id / addon_version. Extra body fields are ignored
+    # by a server older than this, so a new watcher is safe against an old
+    # deployment.
     body.update({k: v for k, v in (source or {}).items() if v})
-    headers = {"X-Ingestion-Token": ingestion_token} if ingestion_token else {}
+    headers = {"X-Watcher-Version": WATCHER_VERSION}
+    if ingestion_token:
+        headers["X-Ingestion-Token"] = ingestion_token
     response = SESSION.post(server_url, json=body, headers=headers, timeout=timeout)
     if response.status_code in (401, 403):
         raise AuthFailed(f"HTTP {response.status_code}")
@@ -478,9 +550,22 @@ def watch(config, stop_event, chosen_path=None):
     chosen_path = chosen_path if chosen_path is not None else []
     state = load_state()
     path = config["savedvars_path"]
+    # A path from the config (typed in, or chosen from the tray menu, which
+    # writes it there) is a decision; auto-discovery only ever follows the
+    # player while nothing is pinned.
+    if path and not looks_like_savedvars(path):
+        # A pinned path that cannot be the save file (an older picker accepted
+        # the addon's code file). Say so and fall back to discovery rather than
+        # watch a file that will never hold an event.
+        log_error(f"The savedvars_path in the config is not in a SavedVariables folder, so it is ignored: {path}")
+        path = None
+    pinned = bool(path)
+    if path:
+        switch_state_to(state, path)
     poll = config["poll_interval"]
 
     watcher_id = load_watcher_id()
+    say(f"Watcher version {WATCHER_VERSION}")
     say(f"Forwarding to {config['server_url']}")
     # Short form, as the Traffic tab shows it, so an operator can ask
     # "what does your log say your id is?" and match a PC to its rows.
@@ -503,6 +588,7 @@ def watch(config, stop_event, chosen_path=None):
     last_delivery = None
     next_scan = 0.0
     announced_waiting = False
+    warned_newer = None
 
     while not stop_event.is_set():
         # A path picked from the tray menu wins over whatever we were watching,
@@ -512,8 +598,9 @@ def watch(config, stop_event, chosen_path=None):
         chosen = chosen_path.pop() if chosen_path else None
         if chosen and chosen != path:
             path = chosen
-            state["sent_count"] = 0
-            backed_up_count = 0
+            pinned = True
+            switch_state_to(state, path)
+            backed_up_count = state["sent_count"]
             file_was_missing = not os.path.exists(path)
             announced_waiting = False
             save_state(state)
@@ -526,6 +613,9 @@ def watch(config, stop_event, chosen_path=None):
                 found = discover_savedvars_paths()
                 if found:
                     path = most_recently_used(found)
+                    switch_state_to(state, path)
+                    backed_up_count = state["sent_count"]
+                    save_state(state)
                     say(f"Found it automatically: {path}")
                     if len(found) > 1:
                         say(f"{len(found)} WoW accounts found — watching the most recently used one.")
@@ -539,6 +629,29 @@ def watch(config, stop_event, chosen_path=None):
                 set_status("Waiting for the addon's first save", "wait")
                 stop_event.wait(poll)
                 continue
+
+        # Keep checking which file the player is actually using. Discovery used
+        # to run once, so a watcher that auto-started with Windows during the
+        # beta kept watching _classic_beta_'s file after the game moved to
+        # _forever_. While nothing is pinned, a sibling that changed more
+        # recently is the live one, and the positions kept per file mean the
+        # switch never re-sends what was already delivered.
+        if time.monotonic() >= next_scan:
+            next_scan = time.monotonic() + DISCOVERY_SCAN_SECONDS
+            newer = newer_sibling(path, discover_savedvars_paths())
+            if newer and pinned:
+                if newer != warned_newer:
+                    say(f"NOTE: {newer} changed more recently than the file pinned in the config. "
+                        "Use 'Choose WoW folder...' in the tray menu to switch to it.")
+                    warned_newer = newer
+            elif newer:
+                say(f"Switching to {newer} — it changed more recently than {path}.")
+                path = newer
+                switch_state_to(state, path)
+                backed_up_count = state["sent_count"]
+                save_state(state)
+                file_was_missing = False
+                notify("Now following your current WoW install.")
 
         if not os.path.exists(path):
             if not file_was_missing:
@@ -560,6 +673,7 @@ def watch(config, stop_event, chosen_path=None):
             continue
 
         events = parse_events(text)
+        addon_version = parse_addon_version(text)
 
         # The addon's queue restarts at index 1 every session, so "already
         # sent 5" only means anything if these are the same 5. Two ways to
@@ -617,7 +731,8 @@ def watch(config, stop_event, chosen_path=None):
                 continue
             try:
                 send_packet(config["server_url"], payload, config["ingestion_token"],
-                            source={"watcher_id": watcher_id, "account_id": account_id_for(path)})
+                            source={"watcher_id": watcher_id, "account_id": account_id_for(path),
+                                    "addon_version": addon_version})
                 state["sent_count"] += 1
                 state["last_sent"] = payload
                 delivered += 1
@@ -707,6 +822,133 @@ def acquire_single_instance():
     _mutex_handle = kernel32.CreateMutexW(None, False, SINGLE_INSTANCE_MUTEX)
     ERROR_ALREADY_EXISTS = 183
     return ctypes.get_last_error() != ERROR_ALREADY_EXISTS
+
+
+def release_single_instance():
+    """Drop our handle on the mutex (ours or the one we merely opened), so a
+    retry can tell whether the real holder has gone."""
+    global _mutex_handle
+    if os.name != "nt" or not _mutex_handle:
+        return
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle(_mutex_handle)
+    _mutex_handle = None
+
+
+def running_watchers():
+    """(pid, exe path) for every other process with this program's file name.
+    Windows only; elsewhere there is nothing to supersede."""
+    if os.name != "nt":
+        return []
+    import ctypes
+    from ctypes import wintypes
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi.EnumProcesses.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                                    ctypes.POINTER(wintypes.DWORD)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+    pids = (wintypes.DWORD * 8192)()
+    needed = wintypes.DWORD()
+    if not psapi.EnumProcesses(pids, ctypes.sizeof(pids), ctypes.byref(needed)):
+        return []
+    own_name = os.path.basename(sys.executable).lower()
+    found = []
+    for pid in pids[: needed.value // ctypes.sizeof(wintypes.DWORD)]:
+        if pid in (0, os.getpid()):
+            continue
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            continue
+        try:
+            buffer = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(1024)
+            if (kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size))
+                    and os.path.basename(buffer.value).lower() == own_name):
+                found.append((pid, buffer.value))
+        finally:
+            kernel32.CloseHandle(handle)
+    return found
+
+
+def installs_to_replace(own_exe, running):
+    """Which of the running watchers are a *different* install: a watcher
+    started from another folder, which is what an older download that still
+    auto-starts with Windows looks like. The same exe started twice is not
+    in the list -- that is a double-click, and is refused as before.
+    (A onefile .exe runs as a loader and a child with the same path, so the
+    path test also keeps our own loader out of the list.)"""
+    own = os.path.normcase(os.path.abspath(own_exe))
+    return [(pid, path) for pid, path in running if os.path.normcase(os.path.abspath(path)) != own]
+
+
+def terminate_process(pid):
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    PROCESS_TERMINATE = 0x0001
+    handle = kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
+    if not handle:
+        return False
+    try:
+        return bool(kernel32.TerminateProcess(handle, 0))
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def take_over_from_other_install():
+    """Called when the single-instance mutex is already held. If the holder
+    is a watcher from a different folder -- an older download that still
+    auto-starts with Windows -- end it and take the mutex: the player just
+    started this one on purpose, and the old one would otherwise keep running
+    (and keep its place in the Startup list) with nobody the wiser. Returns
+    True once this process holds the mutex."""
+    others = installs_to_replace(sys.executable, running_watchers())
+    if not others:
+        return False
+    for pid, path in others:
+        if terminate_process(pid):
+            say(f"Replaced a watcher that was already running from {os.path.dirname(path)} (pid {pid}).")
+        else:
+            log_error(f"Could not end the watcher running from {os.path.dirname(path)} (pid {pid}).")
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        release_single_instance()
+        time.sleep(0.25)
+        if acquire_single_instance():
+            if adopt_startup_entry():
+                say("Start with Windows now points at this copy.")
+            return True
+    return False
+
+
+def adopt_startup_entry():
+    """After replacing another install: if Start with Windows is registered
+    for a watcher somewhere else, make it this one -- or the old copy comes
+    back at the next boot and gets replaced all over again. Leaves a player
+    who turned the setting off alone. Returns True if it was re-pointed."""
+    if os.name != "nt" or not getattr(sys, "frozen", False):
+        return False
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+            value, _ = winreg.QueryValueEx(key, RUN_VALUE)
+    except OSError:
+        return False
+    if value == _startup_command():
+        return False
+    return set_startup(True)
 
 
 # --- Start with Windows -------------------------------------------------------
@@ -894,6 +1136,11 @@ class TrayUI:
         if os.path.basename(chosen).lower() != "landashboard.lua":
             self.notify("That isn't LanDashboard.lua. Look inside WTF\\Account\\<account>\\SavedVariables.")
             return
+        if not looks_like_savedvars(chosen):
+            self.notify("That's the addon's code file, not its save file. "
+                        "The save file is under WTF\\Account\\<account>\\SavedVariables.")
+            log_error(f"Ignored a picked file that is not in a SavedVariables folder: {chosen}")
+            return
         if self.on_path_chosen:
             self.on_path_chosen(chosen)
 
@@ -985,7 +1232,7 @@ def main():
         run_console(config)
         return
 
-    if not acquire_single_instance():
+    if not acquire_single_instance() and not take_over_from_other_install():
         show_message("LAN Dashboard Watcher is already running.\n\n"
                      "Look for its icon in the system tray (bottom-right of the taskbar "
                      "— it may be under the ^ arrow).")
