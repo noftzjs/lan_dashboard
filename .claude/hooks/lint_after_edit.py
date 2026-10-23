@@ -34,7 +34,10 @@ def main():
         cmd = [str(PYTHON), "-m", "ruff", "check", "--quiet", "--output-format", "concise", str(path)]
         tool = "ruff"
     elif suffix == ".lua":
-        luacheck = shutil.which("luacheck")
+        # Project-local binary first (tools/luacheck.exe, git-ignored; see
+        # README "Tests and lint"), then whatever is on PATH.
+        local = ROOT / "tools" / "luacheck.exe"
+        luacheck = str(local) if local.exists() else shutil.which("luacheck")
         if not luacheck:
             return
         cmd = [luacheck, "--no-color", "--codes", str(path)]

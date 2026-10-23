@@ -85,6 +85,18 @@ python -m ruff check .
 
 The suite stubs out `load_dotenv`, so results never depend on your own `.env`, and it's safe to run while a server is up. `ruff.toml` explains the two rule families that are switched off.
 
+Lua: the addon is checked with [luacheck](https://github.com/lunarmodules/luacheck) using the
+`.luacheckrc` at the repo root, which declares the WoW API globals the addon reads. It is not a
+pip package: download `luacheck.exe` from the project's GitHub releases page into `tools/`
+(git-ignored), then
+
+```
+tools\luacheck.exe LanDashboard
+```
+
+The edit hook under `.claude/hooks/` runs it on every `.lua` file Claude touches, the same way it
+runs ruff on `.py` files, so an API typo shows up at the edit rather than in game.
+
 ## Deploying (Coolify)
 
 The repo builds with the included `Dockerfile`. In Coolify: **Build Pack: Dockerfile**, **Ports Exposes: `5000`**, domain as `https://<domain>`, health check off (the slim image has no curl).

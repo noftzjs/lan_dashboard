@@ -31,6 +31,9 @@ savedvars_watcher.log
 # than committing the .exe itself.
 /build/
 /dist/
+# luacheck's standalone Windows build (tools/luacheck.exe, ~800 KB). Fetched
+# from https://github.com/lunarmodules/luacheck/releases; see README.
+tools/luacheck.exe
 *.spec
 
 # The hosted watcher .exe (14 MB, and a new copy every rebuild would stay in
