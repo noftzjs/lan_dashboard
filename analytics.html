@@ -110,7 +110,9 @@
         .prof b { color: var(--text-color); font-weight: 600; font-variant-numeric: tabular-nums; }
         table.data th, table.data td { text-align: left; padding: 7px 10px 7px 0; border-bottom: 1px solid var(--border-color); }
         table.data th { color: var(--text-muted); font-weight: 500; font-size: 12px; cursor: default; }
-        table.data td.num, table.data th.num { text-align: right; font-variant-numeric: tabular-nums; }
+        table.data td.num, table.data th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+        /* secondary count beside a number, e.g. the quests this dashboard saw next to the game's lifetime total */
+        .csub { font-size: 11px; color: var(--text-muted); font-weight: 400; }
         /* Roster header sorting, the same shape as the ladder's: click a
            column to sort by it, click again to flip. The arrow marks the live
            one, aria-sort carries it. */
