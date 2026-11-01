@@ -22,11 +22,10 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -94,13 +93,65 @@ def require_ingestion_token(x_ingestion_token: str | None = Header(None)):
     if not safe_equals(x_ingestion_token or "", INGESTION_TOKEN):
         raise HTTPException(status_code=401, detail="Missing or invalid X-Ingestion-Token header")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# No CORS middleware, on purpose: every page is served from this origin and the
+# watcher is not a browser, so nothing needs cross-origin access. The old
+# allow_origins=["*"] with allow_credentials=True echoed any site's origin
+# back, which let any page an operator visited use their login.
+
+# A real event is one line under 1 KB, and the largest admin request (a person
+# with their characters, tags and streams) is a few KB. Without a cap, a body
+# of any size is read into memory before the token is even checked, so a few
+# large posts from anyone could take the server down mid-LAN.
+MAX_BODY_BYTES = 64 * 1024
+
+
+class BodySizeLimit:
+    """413 for request bodies over MAX_BODY_BYTES: checked against
+    Content-Length up front, and counted as it streams in for chunked bodies
+    that don't declare one."""
+
+    def __init__(self, app, limit: int = MAX_BODY_BYTES):
+        self.app, self.limit = app, limit
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        declared = dict(scope["headers"]).get(b"content-length", b"")
+        if declared.isdigit() and int(declared) > self.limit:
+            await self._too_large(scope, receive, send)
+            return
+        received = 0
+        started = False
+
+        async def counting_receive():
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.limit:
+                    # FastAPI lets HTTPException out of body parsing unchanged.
+                    raise StarletteHTTPException(status_code=413, detail="Request body too large")
+            return message
+
+        async def tracking_send(message):
+            nonlocal started
+            started = started or message["type"] == "http.response.start"
+            await send(message)
+
+        try:
+            await self.app(scope, counting_receive, tracking_send)
+        except StarletteHTTPException as exc:
+            if exc.status_code != 413 or started:
+                raise
+            await self._too_large(scope, receive, send)
+
+    @staticmethod
+    async def _too_large(scope, receive, send):
+        await JSONResponse({"detail": "Request body too large"}, status_code=413)(scope, receive, send)
+
+
+app.add_middleware(BodySizeLimit)
 
 # Lets mock/beta/live data live in separate files (e.g. DB_FILE=beta.db)
 # instead of one file accumulating everything — set per-deployment in .env.
@@ -886,14 +937,17 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 class LogPayload(BaseModel):
-    timestamp: str
-    data: str
+    # Caps well above anything real (an event line is under 1 KB). timestamp is
+    # stored as-is in every history row, and data is echoed into error messages
+    # and the traffic log, so neither can be left unbounded.
+    timestamp: str = Field(max_length=64)
+    data: str = Field(max_length=4000)
     # Sent by watchers from 2026-09-26 on; see clean_source_id.
-    watcher_id: str | None = None
-    account_id: str | None = None
+    watcher_id: str | None = Field(None, max_length=128)
+    account_id: str | None = Field(None, max_length=128)
     # Sent by watcher 1.1.0+ / addon 3.10.1+; see clean_version.
-    watcher_version: str | None = None
-    addon_version: str | None = None
+    watcher_version: str | None = Field(None, max_length=64)
+    addon_version: str | None = Field(None, max_length=64)
 
 class RosterMetaPayload(BaseModel):
     # Fields left as None are unchanged; send "" / [] explicitly to clear one.
@@ -1109,7 +1163,7 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
         log_type = log_type.strip()
 
         if not player_name or not log_type:
-            raise ValueError(f"Malformed payload, missing name/type: {payload.data!r}")
+            raise ValueError(f"Malformed payload, missing name/type: {payload.data[:100]!r}")
         if len(player_name) > PLAYER_NAME_MAX_LENGTH:
             raise ValueError(f"Player name too long ({len(player_name)} chars): {player_name!r}")
 
@@ -1368,7 +1422,7 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                       death_zone or None))
 
             else:
-                raise ValueError(f"Unknown log_type {log_type!r} in payload: {payload.data!r}")
+                raise ValueError(f"Unknown log_type {log_type[:40]!r} in payload: {payload.data[:100]!r}")
 
             # Reaching here means the payload passed validation, so count it
             # as activity for the stale-card check. UTC + ISO so it survives a
@@ -2178,7 +2232,7 @@ async def use_access_link(request: Request, k: str = Query(..., min_length=16, m
         max_age=int(SESSION_DAYS * 86400),
         httponly=True,          # JavaScript never needs it, so it cannot leak one
         samesite="lax",
-        secure=request.url.scheme == "https",
+        secure=cookie_secure(request),
     )
     return response
 
@@ -2268,9 +2322,19 @@ class LoginPayload(BaseModel):
 def safe_next(target: str) -> str:
     """Only same-site paths. Without this, /login?next=https://evil.example
     turns the login into an open redirect that borrows this site's name."""
-    if not target.startswith("/") or target.startswith("//"):
+    # Browsers read "/\evil.example" as "//evil.example", and strip tabs and
+    # newlines out of URLs, so those can't be allowed through either.
+    if (not target.startswith("/") or target.startswith("//") or "\\" in target
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in target)):
         return "/roster"
     return target
+
+
+def cookie_secure(request: Request) -> bool:
+    """Behind Coolify's proxy the app sees plain http (uvicorn only trusts
+    forwarded headers from 127.0.0.1), so an https PUBLIC_URL counts too.
+    Otherwise the session cookie could go out over http on the LAN wifi."""
+    return request.url.scheme == "https" or (PUBLIC_URL or "").startswith("https://")
 
 
 @app.get("/login")
@@ -2299,7 +2363,7 @@ async def log_in(request: Request, payload: LoginPayload):
         SESSION_COOKIE, make_session(ROLE_OPERATOR),
         max_age=int(SESSION_DAYS * 86400),
         httponly=True, samesite="lax",
-        secure=request.url.scheme == "https",
+        secure=cookie_secure(request),
     )
     return response
 

@@ -1,7 +1,7 @@
 """The /api/log-update parser: the one place untrusted text from the game
 becomes stored state, and the thing most likely to break quietly."""
 import pytest
-from conftest import accepted, leaderboard, rejected
+from conftest import accepted, leaderboard, post_event, rejected
 
 STAMP = 1790000000          # 2026-09-21T14:13:20Z, inside the sane range
 
@@ -84,6 +84,40 @@ def test_over_long_fields_are_rejected(server):
     assert "too long" in rejected(server, f"{'N' * 25},ZONE,{STAMP},Somewhere").lower()
     assert "too long" in rejected(server, f"Ok,ZONE,{STAMP},{'Z' * 101}").lower()
     assert "too long" in rejected(server, f"Ok,PROFILE,{STAMP},Horde,MAGE,{'G' * 101}").lower()
+
+
+def test_an_oversized_body_is_refused_before_it_is_read(build_server):
+    """The body is parsed before the token check, so without a cap anyone could
+    post enough to run the server out of memory."""
+    _, client = build_server(INGESTION_TOKEN="right")
+    huge = {"timestamp": "2026-09-23T12:00:00", "data": "x" * 200_000}
+    assert client.post("/api/log-update", json=huge).status_code == 413
+
+
+def test_a_chunked_oversized_body_is_refused_too(server):
+    """No Content-Length to check up front, so the bytes are counted as they arrive."""
+    chunks = (b'{"timestamp":"t","data":"' + b"x" * 16_000 for _ in range(6))
+    response = server.post("/api/log-update", content=chunks, headers={"Content-Type": "application/json"})
+    assert response.status_code == 413
+
+
+def test_over_long_payload_fields_are_refused(server):
+    """A forged client could otherwise grow every history row and the traffic log without bound."""
+    assert post_event(server, "Ok,ZONE,1790000000,Elwynn", timestamp="9" * 65).status_code == 422
+    assert post_event(server, "x" * 4001).status_code == 422
+
+
+def test_error_messages_do_not_echo_the_whole_payload(server):
+    detail = rejected(server, f"Bad,BOGUS,{STAMP}," + "y" * 3000)
+    assert len(detail) < 300
+
+
+def test_other_sites_get_no_cross_origin_access(server):
+    """Any page an operator visits must not be able to call the API with their login."""
+    response = server.options("/api/access-tokens", headers={
+        "Origin": "https://evil.example", "Access-Control-Request-Method": "POST"})
+    assert "access-control-allow-origin" not in response.headers
+    assert "access-control-allow-credentials" not in response.headers
 
 
 def test_a_rejected_payload_does_not_count_as_activity(build_server):

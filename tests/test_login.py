@@ -85,12 +85,24 @@ def test_it_returns_you_to_the_page_you_asked_for(build_server):
     "https://evil.example/phish",
     "//evil.example/phish",
     "http://evil.example",
+    "/\\evil.example",          # browsers read /\ as //
+    "/\t/evil.example",         # and drop tabs and newlines from URLs
+    "/\n/evil.example",
 ])
 def test_it_cannot_be_used_to_redirect_off_site(build_server, target):
     """Otherwise /login?next=<anywhere> is an open redirect that borrows this
     site's name to send people somewhere else."""
     _, client = build_server()
     assert client.post("/api/login", json={**GOOD, "next": target}).json()["next"] == "/roster"
+
+
+def test_the_cookie_is_secure_when_the_public_url_is_https(build_server):
+    """Behind the proxy the app sees http, so the scheme alone would leave the
+    flag off and let the cookie go out over plain http."""
+    _, client = build_server(PUBLIC_URL="https://4l.example")
+    assert "secure" in client.post("/api/login", json=GOOD).headers["set-cookie"].lower()
+    _, client = build_server()
+    assert "secure" not in client.post("/api/login", json=GOOD).headers["set-cookie"].lower()
 
 
 def test_a_relative_path_is_still_allowed(build_server):

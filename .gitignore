@@ -45,6 +45,9 @@ tools/luacheck.exe
 # repo by choice, not needed to run the site.
 tools/mock_generator.py
 
+# Claude Code's per-machine permissions; the shared settings and skills stay tracked.
+.claude/settings.local.json
+
 # pytest
 .pytest_cache/
 .ruff_cache/
