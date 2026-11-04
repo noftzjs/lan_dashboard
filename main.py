@@ -15,7 +15,7 @@ import time
 import zipfile
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import aiosqlite
 from dotenv import load_dotenv
@@ -103,6 +103,18 @@ def require_ingestion_token(x_ingestion_token: str | None = Header(None)):
 # of any size is read into memory before the token is even checked, so a few
 # large posts from anyone could take the server down mid-LAN.
 MAX_BODY_BYTES = 64 * 1024
+BODY_TOO_LARGE = "Request body too large"
+
+INGEST_PATH = "/api/log-update"
+
+
+def refused_for_watcher(detail: str) -> JSONResponse:
+    """How the ingest endpoint refuses anything, even a request refused before
+    it is read: 200 with status "error". The watcher logs that and moves past
+    the event. Any other 4xx it reads as "server unreachable" and retries the
+    same event forever, holding back everything queued behind it. (A wrong
+    token stays a 401 on purpose: those events must be kept, not skipped.)"""
+    return JSONResponse({"status": "error", "detail": detail})
 
 
 class BodySizeLimit:
@@ -122,7 +134,6 @@ class BodySizeLimit:
             await self._too_large(scope, receive, send)
             return
         received = 0
-        started = False
 
         async def counting_receive():
             nonlocal received
@@ -130,25 +141,20 @@ class BodySizeLimit:
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
                 if received > self.limit:
-                    # FastAPI lets HTTPException out of body parsing unchanged.
-                    raise StarletteHTTPException(status_code=413, detail="Request body too large")
+                    # FastAPI lets HTTPException out of body parsing unchanged,
+                    # and the app's exception handlers turn it into the answer.
+                    raise StarletteHTTPException(status_code=413, detail=BODY_TOO_LARGE)
             return message
 
-        async def tracking_send(message):
-            nonlocal started
-            started = started or message["type"] == "http.response.start"
-            await send(message)
-
-        try:
-            await self.app(scope, counting_receive, tracking_send)
-        except StarletteHTTPException as exc:
-            if exc.status_code != 413 or started:
-                raise
-            await self._too_large(scope, receive, send)
+        await self.app(scope, counting_receive, send)
 
     @staticmethod
     async def _too_large(scope, receive, send):
-        await JSONResponse({"detail": "Request body too large"}, status_code=413)(scope, receive, send)
+        if scope["path"] == INGEST_PATH:
+            response = refused_for_watcher(BODY_TOO_LARGE)
+        else:
+            response = JSONResponse({"detail": BODY_TOO_LARGE}, status_code=413)
+        await response(scope, receive, send)
 
 
 app.add_middleware(BodySizeLimit)
@@ -159,11 +165,40 @@ DB_FILE = os.environ.get("DB_FILE", "lan_progression.db")
 
 # How long a character can go without any accepted event (ZONE/PROFILE/XP/
 # QUEST) before the dashboard treats it as stale and hides it — e.g. a bank
-# alt someone logged into and left parked. Note the clock here is when the
-# server *hears* about activity, and delivery is reload-gated (the addon's
-# sync), so a player who's actively playing but hasn't synced recently also
-# looks stale; raise this if that hides people who are really playing.
+# alt someone logged into and left parked. The clock is when the event
+# happened in game where the addon says so (v2.11+), else when the server
+# heard about it. Delivery is reload-gated (the addon's sync), so a player
+# who's actively playing but hasn't synced recently also looks stale; raise
+# this if that hides people who are really playing.
 STALE_AFTER_SECONDS = float(os.environ.get("STALE_AFTER_MINUTES", "60")) * 60
+
+
+def parse_go_live(raw: str | None) -> datetime | None:
+    """GO_LIVE_AT: events that happened in game before this moment are refused.
+
+    Beta testers' addons still hold weeks of queued beta events, and a watcher
+    that is updated or reinstalled sends the whole queue again, which put old
+    beta characters back on the live board. Refusing them on arrival means
+    they never land, rather than being cleaned up afterwards.
+
+    Must carry a UTC offset (2026-11-10T18:00:00-05:00): a bare time would be
+    read in the server's own timezone, which on Coolify is UTC, and the
+    cutoff would quietly be five hours off. Refusing to start is better.
+    """
+    if not raw or not raw.strip():
+        return None
+    value = datetime.fromisoformat(raw.strip())
+    if value.tzinfo is None:
+        raise RuntimeError(f"GO_LIVE_AT needs a UTC offset, e.g. 2026-11-10T18:00:00-05:00 (got {raw!r})")
+    return value.astimezone(timezone.utc)
+
+
+GO_LIVE_AT = parse_go_live(os.environ.get("GO_LIVE_AT"))
+
+# Installs already listed on the traffic page for sending pre-go-live events.
+# A reinstalled watcher can re-send thousands at once; one entry per install
+# says who needs /ldb forget without pushing every real entry off the page.
+_listed_before_go_live: set[str] = set()
 player_states: dict[str, dict[str, Any]] = {}
 
 # Characters the operator has taken off every public view. Anyone can name a
@@ -1147,7 +1182,7 @@ async def close_ingest_db():
         _ingest_conn = None
 
 
-@app.post("/api/log-update")
+@app.post(INGEST_PATH)
 async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_ingestion_token)):
     watcher_id = clean_source_id(payload.watcher_id)
     account_id = clean_source_id(payload.account_id)
@@ -1170,6 +1205,25 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
         event_time = extract_event_time_field(rest)
         if event_time is not None:
             _, _, rest = rest.partition(",")
+
+        # Before go-live: beta data, refused before anything is written. An
+        # addon too old to stamp its events (pre-v2.11) is still let through,
+        # since its events can't be dated either way.
+        #
+        # Answered "ignored", not "error": a re-pushed beta queue can be
+        # thousands of events, and an error makes the player's watcher log a
+        # line for every one. Either answer moves the watcher past the event.
+        if GO_LIVE_AT is not None and event_time is not None and event_time < GO_LIVE_AT:
+            detail = f"Before go-live ({event_time.isoformat()} < {GO_LIVE_AT.isoformat()})"
+            install = watcher_id or account_id or player_name
+            if install not in _listed_before_go_live:
+                _listed_before_go_live.add(install)
+                await broadcast_traffic(record_traffic(
+                    False, payload.data, f"{detail} -- further ones from this install are not listed",
+                    watcher_id, account_id, watcher_version, addon_version))
+            return {"status": "ignored", "detail": detail}
+
+        received_at = datetime.now(timezone.utc)
 
         async with ingest_transaction() as db:
             if log_type == "ZONE":
@@ -1429,8 +1483,16 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
             # restart (persisted below) and parses back unambiguously. QUEST
             # never touched player_states/player_snapshots before, so this
             # upsert is also what creates a row for a quest-only first event.
+            #
+            # When the event happened, not when it arrived: a reinstalled
+            # watcher re-sending an old queue made long-idle characters look
+            # active. Capped at now, so a player's clock running fast can't
+            # keep a character on the board.
             state = player_states.setdefault(player_name, default_state())
-            state["last_activity"] = datetime.now(timezone.utc).isoformat()
+            state["last_activity"] = min(event_time or received_at, received_at).isoformat()
+            # When the server heard from this install: what the people and
+            # source records below mean by created/first/last seen.
+            arrived = received_at.isoformat()
             await db.execute("""
                 INSERT INTO player_snapshots (player, level, current_xp, max_xp, pct, last_updated, last_activity)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1451,11 +1513,11 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                 if person_id is None:
                     person_id, person_name = next_person_id(), player_name
                     await db.execute("INSERT INTO people (id, name, created_at, main_player) VALUES (?, ?, ?, ?)",
-                                     (person_id, person_name, state["last_activity"], person_name))
+                                     (person_id, person_name, arrived, person_name))
                 await db.execute("""
                     INSERT INTO character_person (player, person_id, updated_at) VALUES (?, ?, ?)
                     ON CONFLICT(player) DO NOTHING
-                """, (player_name, person_id, state["last_activity"]))
+                """, (player_name, person_id, arrived))
                 new_person = (person_id, person_name)
             if (watcher_id or account_id) and player_name not in linked_characters:
                 siblings = (characters_by_watcher.get(watcher_id, set())
@@ -1480,7 +1542,7 @@ async def receive_log_update(payload: LogPayload, _auth: None = Depends(require_
                         watcher_version=COALESCE(excluded.watcher_version, watcher_version),
                         addon_version=COALESCE(excluded.addon_version, addon_version)
                 """, (player_name, watcher_id or "", account_id or "",
-                      state["last_activity"], state["last_activity"], watcher_version, addon_version))
+                      arrived, arrived, watcher_version, addon_version))
 
             await db.commit()
 
@@ -2332,9 +2394,14 @@ def safe_next(target: str) -> str:
 
 def cookie_secure(request: Request) -> bool:
     """Behind Coolify's proxy the app sees plain http (uvicorn only trusts
-    forwarded headers from 127.0.0.1), so an https PUBLIC_URL counts too.
-    Otherwise the session cookie could go out over http on the LAN wifi."""
-    return request.url.scheme == "https" or (PUBLIC_URL or "").startswith("https://")
+    forwarded headers from 127.0.0.1), so a request to an https PUBLIC_URL's
+    host counts as https too. Otherwise the session cookie could go out over
+    http on the LAN wifi. Only that host: opened by its LAN address over http,
+    a secure cookie would be dropped and the login would loop."""
+    if request.url.scheme == "https":
+        return True
+    public = urlsplit(PUBLIC_URL or "")
+    return public.scheme == "https" and request.url.hostname == public.hostname
 
 
 @app.get("/login")
@@ -2403,9 +2470,6 @@ async def broadcast_traffic(entry: dict):
 #
 # Scoped to the ingest path only, and each handler hands back the same
 # response FastAPI would have sent, so no client sees a difference.
-INGEST_PATH = "/api/log-update"
-
-
 async def _ingest_body(request: Request) -> tuple[str, str | None, str | None]:
     """The payload as the operator would want to see it -- the "data" string
     when the body is JSON that has one, otherwise the raw text -- plus the
@@ -2428,15 +2492,18 @@ async def record_malformed_ingest(request: Request, exc: RequestValidationError)
             f"{'.'.join(str(p) for p in e.get('loc', ())[1:]) or 'body'}: {e.get('msg', '')}"
             for e in exc.errors()
         )
+        detail = f"Request refused before reading it -- {problems}"
         text, watcher_id, account_id = await _ingest_body(request)
-        await broadcast_traffic(record_traffic(
-            False, text, f"Request refused before reading it (HTTP 422) -- {problems}",
-            watcher_id, account_id))
+        await broadcast_traffic(record_traffic(False, text, detail, watcher_id, account_id))
+        return refused_for_watcher(detail)
     return await request_validation_exception_handler(request, exc)
 
 
 @app.exception_handler(StarletteHTTPException)
 async def record_unauthorised_ingest(request: Request, exc: StarletteHTTPException):
+    if request.url.path == INGEST_PATH and exc.status_code == 413:
+        # A chunked body that outgrew the cap while streaming in.
+        return refused_for_watcher(BODY_TOO_LARGE)
     if request.url.path == INGEST_PATH and exc.status_code == 401:
         # Never echo the token that was sent -- a near-miss of the real one
         # is still worth keeping off anyone's screen.

@@ -53,7 +53,8 @@ Set in `.env` locally, or in the host's environment settings when deployed. `.en
 | `INGESTION_TOKEN` | *unset (open)* | Shared secret every watcher must send. **Required once the server is reachable from the internet.** |
 | `DOWNLOAD_PASSPHRASE` | *unset* | Gates the watcher download on `/setup`. Friends enter it and get a zip with the `.exe` and a ready-made config, so they never see the token. |
 | `PUBLIC_URL` | *from request* | Address written into that bundled config, e.g. `https://4l.example.net`. |
-| `STALE_AFTER_MINUTES` | `60` | How long without events before a character drops off the dashboard. |
+| `STALE_AFTER_MINUTES` | `60` | How long without events before a character drops off the dashboard, counted from when the event happened in game (addon v2.11+). |
+| `GO_LIVE_AT` | *unset (off)* | Events that happened in game before this moment are ignored, so re-sent beta queues never reach the board. Needs a UTC offset, e.g. `2026-11-10T18:00:00-05:00`; the server won't start without one. Events from pre-v2.11 addons carry no time and are still accepted. |
 | `SESSION_DAYS` | `30` | How long an operator or viewer sign-in lasts. |
 | `SESSION_SECRET` | *derived from password* | Signs session cookies. Changing `ROSTER_PASSWORD` already signs everyone out; set this only to rotate independently. |
 | `TRAFFIC_LOG_SIZE` | `300` | Ingest attempts kept in memory for the Traffic tab. |
