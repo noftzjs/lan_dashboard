@@ -86,25 +86,57 @@ def test_over_long_fields_are_rejected(server):
     assert "too long" in rejected(server, f"Ok,PROFILE,{STAMP},Horde,MAGE,{'G' * 101}").lower()
 
 
+def refused_for_the_watcher(response):
+    """A request refused before it is read still has to be answered the way the
+    watcher understands: 200 with status "error", so it logs the event and moves
+    on. Any other 4xx reads as "server unreachable" and the watcher retries that
+    one event forever, holding back everything queued behind it."""
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "error", body
+    return body["detail"]
+
+
 def test_an_oversized_body_is_refused_before_it_is_read(build_server):
     """The body is parsed before the token check, so without a cap anyone could
     post enough to run the server out of memory."""
     _, client = build_server(INGESTION_TOKEN="right")
     huge = {"timestamp": "2026-09-23T12:00:00", "data": "x" * 200_000}
-    assert client.post("/api/log-update", json=huge).status_code == 413
+    assert "too large" in refused_for_the_watcher(client.post("/api/log-update", json=huge)).lower()
 
 
 def test_a_chunked_oversized_body_is_refused_too(server):
     """No Content-Length to check up front, so the bytes are counted as they arrive."""
     chunks = (b'{"timestamp":"t","data":"' + b"x" * 16_000 for _ in range(6))
     response = server.post("/api/log-update", content=chunks, headers={"Content-Type": "application/json"})
+    assert "too large" in refused_for_the_watcher(response).lower()
+
+
+def test_an_oversized_body_elsewhere_is_still_a_413(server):
+    """Only the watcher's endpoint needs the special answer; browsers get HTTP's."""
+    response = server.post("/api/login", json={"username": "x" * 100_000, "password": "p"})
+    assert response.status_code == 413
+    chunks = (b'{"username":"' + b"x" * 16_000 for _ in range(6))
+    response = server.post("/api/login", content=chunks, headers={"Content-Type": "application/json"})
     assert response.status_code == 413
 
 
 def test_over_long_payload_fields_are_refused(server):
     """A forged client could otherwise grow every history row and the traffic log without bound."""
-    assert post_event(server, "Ok,ZONE,1790000000,Elwynn", timestamp="9" * 65).status_code == 422
-    assert post_event(server, "x" * 4001).status_code == 422
+    refused_for_the_watcher(post_event(server, "Ok,ZONE,1790000000,Elwynn", timestamp="9" * 65))
+    refused_for_the_watcher(post_event(server, "x" * 4001))
+
+
+def test_a_refused_request_does_not_hold_back_the_next_event(server):
+    refused_for_the_watcher(post_event(server, "x" * 4001))
+    accepted(server, f"Next,ZONE,{STAMP},Elwynn Forest")
+
+
+def test_a_wrong_token_is_still_a_401(build_server):
+    """The one refusal the watcher must not skip past: its events are kept
+    until the token is fixed."""
+    _, client = build_server(INGESTION_TOKEN="right")
+    assert post_event(client, f"Ok,ZONE,{STAMP},Elwynn", token="wrong").status_code == 401
 
 
 def test_error_messages_do_not_echo_the_whole_payload(server):

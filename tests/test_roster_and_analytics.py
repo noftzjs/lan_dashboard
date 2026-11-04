@@ -1,6 +1,8 @@
 """Operator-curated metadata (tags, stream links) and the analytics
 aggregation — the parts where a number being quietly wrong matters more than
 a request failing."""
+import time
+
 import pytest
 from conftest import ROSTER_AUTH, accepted, leaderboard
 
@@ -76,7 +78,8 @@ def test_a_character_the_server_has_never_heard_from_reports_no_age(server):
 
 
 def test_activity_refreshes_the_age(server):
-    accepted(server, f"Active,XP,{STAMP},10,100,1000")
+    # Stamped now: age is measured from when the event happened in game.
+    accepted(server, f"Active,XP,{int(time.time())},10,100,1000")
     assert leaderboard(server)["Active"]["idle_seconds"] == pytest.approx(0, abs=5)
 
 

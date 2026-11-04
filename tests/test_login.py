@@ -96,13 +96,24 @@ def test_it_cannot_be_used_to_redirect_off_site(build_server, target):
     assert client.post("/api/login", json={**GOOD, "next": target}).json()["next"] == "/roster"
 
 
+def cookie_flags(client, host):
+    return client.post("/api/login", json=GOOD, headers={"Host": host}).headers["set-cookie"].lower()
+
+
 def test_the_cookie_is_secure_when_the_public_url_is_https(build_server):
     """Behind the proxy the app sees http, so the scheme alone would leave the
     flag off and let the cookie go out over plain http."""
     _, client = build_server(PUBLIC_URL="https://4l.example")
-    assert "secure" in client.post("/api/login", json=GOOD).headers["set-cookie"].lower()
+    assert "secure" in cookie_flags(client, "4l.example")
     _, client = build_server()
-    assert "secure" not in client.post("/api/login", json=GOOD).headers["set-cookie"].lower()
+    assert "secure" not in cookie_flags(client, "4l.example")
+
+
+def test_signing_in_over_another_address_still_works(build_server):
+    """Opened by its LAN address over plain http, a secure cookie would be
+    dropped by the browser and the login would loop back to itself."""
+    _, client = build_server(PUBLIC_URL="https://4l.example")
+    assert "secure" not in cookie_flags(client, "192.168.1.20:8000")
 
 
 def test_a_relative_path_is_still_allowed(build_server):

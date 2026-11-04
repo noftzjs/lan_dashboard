@@ -203,11 +203,13 @@ def test_a_refusal_reaches_a_listening_operator(build_server):
 def test_a_malformed_request_is_recorded_and_still_refused(build_server):
     _, client = build_server()
     response = client.post("/api/log-update", json={"data": f"Ayla,ZONE,{STAMP},Ironforge"})
-    assert response.status_code == 422, "the watcher must see the same refusal as before"
+    # 200 + "error", not a 422: the watcher retries any other 4xx forever.
+    assert response.status_code == 200
+    assert response.json()["status"] == "error"
 
     entry = traffic(client)["entries"][-1]
     assert entry["accepted"] is False
-    assert "422" in entry["detail"] and "timestamp" in entry["detail"]
+    assert "before reading" in entry["detail"] and "timestamp" in entry["detail"]
     assert entry["payload"] == f"Ayla,ZONE,{STAMP},Ironforge", "the data string, not the JSON around it"
     assert entry["player"] == "Ayla"
 
@@ -216,7 +218,7 @@ def test_a_body_that_is_not_json_is_recorded(build_server):
     _, client = build_server()
     response = client.post("/api/log-update", content=b"not json at all",
                            headers={"Content-Type": "application/json"})
-    assert response.status_code == 422
+    assert response.json()["status"] == "error"
 
     entry = traffic(client)["entries"][-1]
     assert entry["accepted"] is False

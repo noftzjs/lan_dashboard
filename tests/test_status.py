@@ -6,6 +6,7 @@ server for it — so they're sampled together at login and on level-up rather
 than chased individually.
 """
 import sqlite3
+import time
 
 import pytest
 from conftest import accepted, leaderboard, rejected
@@ -162,8 +163,9 @@ def test_analytics_reports_absent_gold_as_none(server):
 
 def test_status_counts_as_activity(server):
     """A capped character with nothing else to report still has to look alive
-    rather than drifting into the idle filter."""
-    accepted(server, status())
+    rather than drifting into the idle filter. Stamped now: age is measured
+    from when the event happened in game."""
+    accepted(server, status().replace(f",{STAMP},", f",{int(time.time())},", 1))
     assert leaderboard(server)["Ayla"]["idle_seconds"] == pytest.approx(0, abs=5)
 
 
